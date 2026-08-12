@@ -3,7 +3,7 @@
 # Aborta o script em erros não tratados
 set -e
 
-# Função de pausa em sintaxe POSIX sh
+# Função de pausa em sintaxe POSIX sh com limpeza de buffer
 pausar_para_usuario() {
     echo ""
     echo "============================================================"
@@ -111,7 +111,6 @@ echo "============================================================"
 echo " 5. Múltipla Detecção de Placas Mellanox / NVIDIA"
 echo "============================================================"
 
-# Busca todos os endereços PCI com ID do fornecedor Mellanox (15b3)
 PCI_DEVS=$(lspci -d 15b3: | awk '{print $1}')
 
 if [ -z "$PCI_DEVS" ]; then
@@ -133,12 +132,11 @@ echo " 6. Seleção do Arquivo de Firmware (.bin)"
 echo "============================================================"
 
 echo "Informe o nome ou caminho do arquivo de firmware."
-echo "(Exemplo: cx5fw.bin ou /root/firmware_mcx516a.bin)"
+echo "(Exemplo: /root/fw-ConnectX5-rel-16_35_1012-MCX516A-CCA_Ax-UEFI-14.28.15-FlexBoot-3.6.804.bin)"
 echo ""
 printf "Nome/Caminho do arquivo .bin [/root/cx5fw.bin]: "
 read FW_FILE < /dev/tty
 
-# Define caminho padrão caso o usuário pressione ENTER
 if [ -z "$FW_FILE" ]; then
     FW_FILE="/root/cx5fw.bin"
 fi
@@ -166,7 +164,6 @@ if [ ! -s "$FW_FILE" ]; then
     exit 1
 fi
 
-# Leitura das informações do arquivo .bin selecionado
 FILE_QUERY=$(mstflint -i "$FW_FILE" q 2>/dev/null || true)
 
 if [ -z "$FILE_QUERY" ]; then
@@ -203,7 +200,9 @@ for DEV in $PCI_DEVS; do
 
     if [ "$CARD_PSID" = "$FILE_PSID" ]; then
         echo "  ✅ PSIDs compatíveis! Iniciando gravação do firmware..."
-        mstflint -d "$DEV" -i "$FW_FILE" burn
+        
+        # Adicionada a flag -y para não abortar mesmo reescrevendo a mesma versão de FW
+        mstflint -d "$DEV" -i "$FW_FILE" -y burn
 
         echo "  Configurando suporte a Boot na BIOS (Option ROM PXE/UEFI)..."
         mstconfig -d "$DEV" set EXP_ROM_PXE_ENABLE=1 EXP_ROM_UEFI_x86_ENABLE=1 -y

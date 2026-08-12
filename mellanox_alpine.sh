@@ -108,98 +108,119 @@ MSG_PAUSA_1="Execute no Prompt/PowerShell do Windows para baixar o backup:
 pausar_para_usuario "$MSG_PAUSA_1"
 
 echo "============================================================"
-echo " 5. Identificando Placa Mellanox / NVIDIA"
+echo " 5. Múltipla Detecção de Placas Mellanox / NVIDIA"
 echo "============================================================"
-PCI_DEV=$(lspci -d 15b3: | head -n 1 | awk '{print $1}')
 
-if [ -z "$PCI_DEV" ]; then
+# Busca todos os endereços PCI com ID do fornecedor Mellanox (15b3)
+PCI_DEVS=$(lspci -d 15b3: | awk '{print $1}')
+
+if [ -z "$PCI_DEVS" ]; then
     echo "❌ Nenhuma placa Mellanox (ID PCI 15b3) foi encontrada no barramento!"
     exit 1
 fi
 
-echo "Placa encontrada no endereço PCI: $PCI_DEV"
-CARD_QUERY=$(mstflint -d "$PCI_DEV" q)
-echo "$CARD_QUERY"
+echo "Placas detectadas no sistema:"
+echo "------------------------------------------------------------"
+for DEV in $PCI_DEVS; do
+    DEV_PSID=$(mstflint -d "$DEV" q 2>/dev/null | grep -i "PSID:" | awk '{print $2}' || echo "N/A")
+    DEV_DESC=$(lspci -s "$DEV" | cut -d ':' -f3-)
+    echo "  • Endereço PCI: $DEV | PSID: $DEV_PSID | Modelo:$DEV_DESC"
+done
+echo "------------------------------------------------------------"
 
-CARD_PSID=$(echo "$CARD_QUERY" | grep -i "PSID:" | awk '{print $2}')
+echo "============================================================"
+echo " 6. Seleção do Arquivo de Firmware (.bin)"
+echo "============================================================"
 
-if [ -z "$CARD_PSID" ]; then
-    echo "❌ Não foi possível ler o PSID da placa no endereço $PCI_DEV."
-    exit 1
+echo "Informe o nome ou caminho do arquivo de firmware."
+echo "(Exemplo: cx5fw.bin ou /root/firmware_mcx516a.bin)"
+echo ""
+printf "Nome/Caminho do arquivo .bin [/root/cx5fw.bin]: "
+read FW_FILE < /dev/tty
+
+# Define caminho padrão caso o usuário pressione ENTER
+if [ -z "$FW_FILE" ]; then
+    FW_FILE="/root/cx5fw.bin"
 fi
 
-echo "✅ PSID da placa física: $CARD_PSID"
-
-echo "============================================================"
-echo " 6. Obtenção do Arquivo de Firmware (.bin)"
-echo "============================================================"
-
-if [ ! -f /root/cx5fw.bin ]; then
-    echo "O arquivo /root/cx5fw.bin não existe no servidor Alpine."
+if [ ! -f "$FW_FILE" ]; then
     echo ""
-    printf "Digite a URL para download do .bin (ou pressione [ENTER] para SCP via Windows): "
+    echo "O arquivo '$FW_FILE' não foi encontrado localmente."
+    printf "Digite uma URL para baixar via wget (ou Pressione [ENTER] para SCP via Windows): "
     read FW_URL < /dev/tty
 
     if [ -n "$FW_URL" ]; then
         echo "Baixando arquivo via wget..."
-        wget -O /root/cx5fw.bin "$FW_URL"
+        wget -O "$FW_FILE" "$FW_URL"
     else
         MSG_PAUSA_2="No Windows, envie o arquivo de firmware (.bin) executando:
 
-   scp \"C:\caminho\seu_arquivo.bin\" root@${HOST_IP}:/root/cx5fw.bin"
+   scp \"C:\caminho\seu_arquivo.bin\" root@${HOST_IP}:${FW_FILE}"
 
         pausar_para_usuario "$MSG_PAUSA_2"
     fi
 fi
 
-if [ ! -s /root/cx5fw.bin ]; then
-    echo "❌ O arquivo /root/cx5fw.bin não existe ou tem tamanho 0 bytes!"
+if [ ! -s "$FW_FILE" ]; then
+    echo "❌ O arquivo $FW_FILE não existe ou está vazio (0 bytes)!"
     exit 1
 fi
 
-echo "============================================================"
-echo " 7. Validação de Integridade e Compatibilidade de Firmware"
-echo "============================================================"
-
-FILE_QUERY=$(mstflint -i /root/cx5fw.bin q 2>/dev/null || true)
+# Leitura das informações do arquivo .bin selecionado
+FILE_QUERY=$(mstflint -i "$FW_FILE" q 2>/dev/null || true)
 
 if [ -z "$FILE_QUERY" ]; then
-    echo "❌ O arquivo /root/cx5fw.bin é inválido ou está corrompido!"
+    echo "❌ O arquivo $FW_FILE é um firmware inválido ou está corrompido!"
     exit 1
 fi
 
 FILE_PSID=$(echo "$FILE_QUERY" | grep -i "PSID:" | awk '{print $2}')
+echo ""
+echo "✅ Arquivo de firmware carregado com sucesso!"
+echo "   - Arquivo: $FW_FILE"
+echo "   - PSID do Firmware: $FILE_PSID"
 
-echo "Comparativo de Segurança:"
-echo "  - PSID Placa Física: $CARD_PSID"
-echo "  - PSID Arquivo .bin: $FILE_PSID"
-
-if [ "$CARD_PSID" != "$FILE_PSID" ]; then
-    echo "❌ [BLOQUEIO DE SEGURANÇA] PSIDs incompatíveis!"
-    exit 1
-fi
-
-echo "✅ Validação bem-sucedida! PSIDs correspondentes."
-
-MSG_PAUSA_3="Tudo pronto para gravar o firmware na placa $PCI_DEV.
-   Esta operação é irreversível durante a gravação."
+MSG_PAUSA_3="O firmware será aplicado em TODAS as placas compatíveis com o PSID: $FILE_PSID.
+   A gravação de hardware é irreversível durante a execução."
 
 pausar_para_usuario "$MSG_PAUSA_3"
 
 echo "============================================================"
-echo " 8. Gravando Firmware (Burn) e Habilitando Option ROM"
+echo " 7. Atualização em Lote (Burn) e Habilitação na BIOS"
 echo "============================================================"
 
-echo "Executando burn do firmware..."
-mstflint -d "$PCI_DEV" -i /root/cx5fw.bin burn
+for DEV in $PCI_DEVS; do
+    echo ""
+    echo "------------------------------------------------------------"
+    echo " Processando placa PCI: $DEV"
+    echo "------------------------------------------------------------"
 
-echo "Habilitando suporte a boot na BIOS (Option ROM PXE/UEFI)..."
-mstconfig -d "$PCI_DEV" set EXP_ROM_PXE_ENABLE=1 EXP_ROM_UEFI_x86_ENABLE=1 -y
+    CARD_QUERY=$(mstflint -d "$DEV" q 2>/dev/null || true)
+    CARD_PSID=$(echo "$CARD_QUERY" | grep -i "PSID:" | awk '{print $2}' || echo "DESCONHECIDO")
 
-mstconfig -d "$PCI_DEV" set LINK_TYPE_P1=2 LINK_TYPE_P2=2 -y 2>/dev/null || echo "Info: Placa é Ethernet fixa (EN). Parâmetros LINK_TYPE ignorados."
+    echo "  - PSID da placa: $CARD_PSID"
+    echo "  - PSID do arquivo: $FILE_PSID"
 
+    if [ "$CARD_PSID" = "$FILE_PSID" ]; then
+        echo "  ✅ PSIDs compatíveis! Iniciando gravação do firmware..."
+        mstflint -d "$DEV" -i "$FW_FILE" burn
+
+        echo "  Configurando suporte a Boot na BIOS (Option ROM PXE/UEFI)..."
+        mstconfig -d "$DEV" set EXP_ROM_PXE_ENABLE=1 EXP_ROM_UEFI_x86_ENABLE=1 -y
+
+        mstconfig -d "$DEV" set LINK_TYPE_P1=2 LINK_TYPE_P2=2 -y 2>/dev/null || \
+            echo "  Info: Placa é Ethernet fixa (EN). Parâmetros LINK_TYPE ignorados com sucesso."
+        
+        echo "  ✅ Placa $DEV atualizada e configurada!"
+    else
+        echo "  ⚠️ PULO DE SEGURANÇA: O PSID da placa ($CARD_PSID) diverge do firmware ($FILE_PSID)."
+        echo "  A placa $DEV não foi alterada."
+    fi
+done
+
+echo ""
 echo "============================================================"
-echo " 9. Operação Concluída - Power Cycle / Reinicialização"
+echo " 8. Operação Concluída - Power Cycle / Reinicialização"
 echo "============================================================"
 
 printf "Deseja realizar o Power Cycle via IPMI agora? (s/N): "
@@ -220,8 +241,8 @@ case "$RESPOSTA" in
         ipmitool -I lanplus -H "$BMC_IP" -U "$BMC_USER" -P "$BMC_PASS" chassis power cycle
         ;;
     * )
-        echo "Execute 'reboot' ou realize o Power Cycle via IPMI manualmente para concluir."
+        echo "Execute 'reboot' ou realize o Power Cycle via IPMI manualmente para aplicar o novo firmware."
         ;;
 esac
 
-echo "✅ Processo executado com sucesso!"
+echo "✅ Script finalizado!"

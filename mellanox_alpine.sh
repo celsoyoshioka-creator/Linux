@@ -3,7 +3,7 @@
 # Aborta o script em erros não tratados
 set -e
 
-# Função de pausa em sintaxe POSIX sh com limpeza de buffer
+# Função de pausa em sintaxe POSIX sh
 pausar_para_usuario() {
     echo ""
     echo "============================================================"
@@ -108,32 +108,10 @@ MSG_PAUSA_1="Execute no Prompt/PowerShell do Windows para baixar o backup:
 pausar_para_usuario "$MSG_PAUSA_1"
 
 echo "============================================================"
-echo " 5. Múltipla Detecção de Placas Mellanox / NVIDIA"
-echo "============================================================"
-
-PCI_DEVS=$(lspci -d 15b3: | awk '{print $1}')
-
-if [ -z "$PCI_DEVS" ]; then
-    echo "❌ Nenhuma placa Mellanox (ID PCI 15b3) foi encontrada no barramento!"
-    exit 1
-fi
-
-echo "Placas detectadas no sistema:"
-echo "------------------------------------------------------------"
-for DEV in $PCI_DEVS; do
-    DEV_PSID=$(mstflint -d "$DEV" q 2>/dev/null | grep -i "PSID:" | awk '{print $2}' || echo "N/A")
-    DEV_DESC=$(lspci -s "$DEV" | cut -d ':' -f3-)
-    echo "  • Endereço PCI: $DEV | PSID: $DEV_PSID | Modelo:$DEV_DESC"
-done
-echo "------------------------------------------------------------"
-
-echo "============================================================"
-echo " 6. Seleção do Arquivo de Firmware (.bin)"
+echo " 5. Seleção do Arquivo de Firmware (.bin)"
 echo "============================================================"
 
 echo "Informe o nome ou caminho do arquivo de firmware."
-echo "(Exemplo: /root/fw-ConnectX5-rel-16_35_1012-MCX516A-CCA_Ax-UEFI-14.28.15-FlexBoot-3.6.804.bin)"
-echo ""
 printf "Nome/Caminho do arquivo .bin [/root/cx5fw.bin]: "
 read FW_FILE < /dev/tty
 
@@ -172,54 +150,105 @@ if [ -z "$FILE_QUERY" ]; then
 fi
 
 FILE_PSID=$(echo "$FILE_QUERY" | grep -i "PSID:" | awk '{print $2}')
+FILE_FW_VER=$(echo "$FILE_QUERY" | grep -i "FW Version:" | awk '{print $3}')
+
 echo ""
 echo "✅ Arquivo de firmware carregado com sucesso!"
 echo "   - Arquivo: $FW_FILE"
 echo "   - PSID do Firmware: $FILE_PSID"
+echo "   - Versão do Firmware no Arquivo: $FILE_FW_VER"
 
-MSG_PAUSA_3="O firmware será aplicado em TODAS as placas compatíveis com o PSID: $FILE_PSID.
+echo "============================================================"
+echo " 6. Filtrando Placas Elegíveis para Atualização"
+echo "============================================================"
+
+PCI_DEVS=$(lspci -d 15b3: | awk '{print $1}')
+
+if [ -z "$PCI_DEVS" ]; then
+    echo "❌ Nenhuma placa Mellanox (ID PCI 15b3) foi encontrada no barramento!"
+    exit 1
+fi
+
+VALID_DEVS=""
+COUNT=0
+
+for DEV in $PCI_DEVS; do
+    CARD_QUERY=$(mstflint -d "$DEV" q 2>/dev/null || true)
+    CARD_PSID=$(echo "$CARD_QUERY" | grep -i "PSID:" | awk '{print $2}' || echo "N/A")
+    CARD_FW_VER=$(echo "$CARD_QUERY" | grep -i "FW Version:" | awk '{print $3}' || echo "N/A")
+
+    # Regras: O PSID deve ser idêntico E a versão do FW deve ser diferente
+    if [ "$CARD_PSID" = "$FILE_PSID" ] && [ "$CARD_FW_VER" != "$FILE_FW_VER" ]; then
+        COUNT=$((COUNT + 1))
+        
+        # Armazena mapeamento no formato: INDICE|DEV|FW_ATUAL
+        eval "DEV_MAP_$COUNT=\"$DEV\""
+        eval "FW_MAP_$COUNT=\"$CARD_FW_VER\""
+    else
+        echo " ℹ️ Placa $DEV ignorada (PSID: $CARD_PSID | FW Atual: $CARD_FW_VER) -> Já está atualizada ou é incompatível."
+    fi
+done
+
+if [ "$COUNT" -eq 0 ]; then
+    echo ""
+    echo "✅ Todas as placas compatíveis com o PSID $FILE_PSID já estão na versão $FILE_FW_VER (ou nenhuma placa compatível foi encontrada)."
+    echo "Nenhuma atualização pendente!"
+    exit 0
+fi
+
+echo ""
+echo "============================================================"
+echo " 7. Seleção da Placa para Atualizar"
+echo "============================================================"
+echo "Selecione UMA placa para aplicar a atualização:"
+echo ""
+
+i=1
+while [ "$i" -le "$COUNT" ]; do
+    eval "TMP_DEV=\$DEV_MAP_$i"
+    eval "TMP_FW=\$FW_MAP_$i"
+    echo "  $i) Endereço PCI: $TMP_DEV (FW Atual: $TMP_FW ➔ Novo FW: $FILE_FW_VER)"
+    i=$((i + 1))
+done
+
+echo ""
+printf "Digite o número da placa desejada (1-$COUNT) ou '0' para cancelar: "
+read OPCAO < /dev/tty
+
+if [ "$OPCAO" -eq 0 ] 2>/dev/null; then
+    echo "Operação cancelada pelo usuário."
+    exit 0
+fi
+
+if [ "$OPCAO" -lt 1 ] 2>/dev/null || [ "$OPCAO" -gt "$COUNT" ] 2>/dev/null; then
+    echo "❌ Opção inválida! Encerrando."
+    exit 1
+fi
+
+eval "SELECTED_DEV=\$DEV_MAP_$OPCAO"
+
+MSG_PAUSA_3="Tudo pronto para gravar o firmware na placa $SELECTED_DEV.
    A gravação de hardware é irreversível durante a execução."
 
 pausar_para_usuario "$MSG_PAUSA_3"
 
 echo "============================================================"
-echo " 7. Atualização em Lote (Burn) e Habilitação na BIOS"
+echo " 8. Gravando Firmware (Burn) e Habilitando Option ROM"
 echo "============================================================"
 
-for DEV in $PCI_DEVS; do
-    echo ""
-    echo "------------------------------------------------------------"
-    echo " Processando placa PCI: $DEV"
-    echo "------------------------------------------------------------"
+echo "Executando burn do firmware na placa $SELECTED_DEV..."
+mstflint -d "$SELECTED_DEV" -i "$FW_FILE" -y burn
 
-    CARD_QUERY=$(mstflint -d "$DEV" q 2>/dev/null || true)
-    CARD_PSID=$(echo "$CARD_QUERY" | grep -i "PSID:" | awk '{print $2}' || echo "DESCONHECIDO")
+echo "Configurando suporte a Boot na BIOS (Option ROM PXE/UEFI)..."
+mstconfig -d "$SELECTED_DEV" set EXP_ROM_PXE_ENABLE=1 EXP_ROM_UEFI_x86_ENABLE=1 -y
 
-    echo "  - PSID da placa: $CARD_PSID"
-    echo "  - PSID do arquivo: $FILE_PSID"
+mstconfig -d "$SELECTED_DEV" set LINK_TYPE_P1=2 LINK_TYPE_P2=2 -y 2>/dev/null || \
+    echo "Info: Placa é Ethernet fixa (EN). Parâmetros LINK_TYPE ignorados com sucesso."
 
-    if [ "$CARD_PSID" = "$FILE_PSID" ]; then
-        echo "  ✅ PSIDs compatíveis! Iniciando gravação do firmware..."
-        
-        # Adicionada a flag -y para não abortar mesmo reescrevendo a mesma versão de FW
-        mstflint -d "$DEV" -i "$FW_FILE" -y burn
+echo "✅ Placa $SELECTED_DEV atualizada com sucesso!"
 
-        echo "  Configurando suporte a Boot na BIOS (Option ROM PXE/UEFI)..."
-        mstconfig -d "$DEV" set EXP_ROM_PXE_ENABLE=1 EXP_ROM_UEFI_x86_ENABLE=1 -y
-
-        mstconfig -d "$DEV" set LINK_TYPE_P1=2 LINK_TYPE_P2=2 -y 2>/dev/null || \
-            echo "  Info: Placa é Ethernet fixa (EN). Parâmetros LINK_TYPE ignorados com sucesso."
-        
-        echo "  ✅ Placa $DEV atualizada e configurada!"
-    else
-        echo "  ⚠️ PULO DE SEGURANÇA: O PSID da placa ($CARD_PSID) diverge do firmware ($FILE_PSID)."
-        echo "  A placa $DEV não foi alterada."
-    fi
-done
-
-echo ""
 echo "============================================================"
-echo " 8. Operação Concluída - Power Cycle / Reinicialização"
+echo " 9. Operação Concluída - Power Cycle / Reinicialização"
 echo "============================================================"
 
 printf "Deseja realizar o Power Cycle via IPMI agora? (s/N): "
@@ -244,4 +273,4 @@ case "$RESPOSTA" in
         ;;
 esac
 
-echo "✅ Script finalizado!"
+echo "✅ Processo finalizado!"

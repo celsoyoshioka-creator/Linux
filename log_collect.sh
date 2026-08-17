@@ -54,8 +54,7 @@ echo -e "${YELLOW}[+] Detected Operating System: ${OS_TYPE:-Unknown} (Package Ma
 # ------------------------------------------------------------------------------
 # AUTOMATIC DEPENDENCY INSTALLATION
 # ------------------------------------------------------------------------------
-echo -e "
-${YELLOW}[+] Checking and installing base OS dependencies...${NC}"
+echo -e "\n${YELLOW}[+] Checking and installing base OS dependencies...${NC}"
 
 install_package() {
     local cmd="$1"
@@ -87,8 +86,7 @@ install_package "git" "git" "git"
 # AUTO-INSTALL MELLANOX SOFTWARE TOOLS (mstdump) IF MISSING
 # ------------------------------------------------------------------------------
 if ! command -v mstdump &> /dev/null && ! command -v mst &> /dev/null; then
-    echo -e "
-${YELLOW}[+] Mellanox tools missing. Attempting automatic installation...${NC}"
+    echo -e "\n${YELLOW}[+] Mellanox tools missing. Attempting automatic installation...${NC}"
     if [ "$PKG_MANAGER" = "apt" ]; then
         apt-get install -y -qq mstflint || true
     elif [ "$PKG_MANAGER" = "dnf" ]; then
@@ -101,8 +99,7 @@ fi
 # ------------------------------------------------------------------------------
 # 1. SYSINFO SNAPSHOT (linux-sysinfo-snapshot) - AUTO DOWNLOAD & RUN
 # ------------------------------------------------------------------------------
-echo -e "
-${YELLOW}[1/4] Setting up and running Sysinfo Snapshot...${NC}"
+echo -e "\n${YELLOW}[1/4] Setting up and running Sysinfo Snapshot...${NC}"
 
 SYSINFO_BIN=""
 
@@ -120,11 +117,10 @@ if [ -z "$SYSINFO_BIN" ]; then
     echo "Downloading sysinfo-snapshot automatically from GitHub..."
     mkdir -p /tmp/sysinfo_download
     
-    # Download zip or clone repo
     if wget -q https://github.com/Mellanox/linux-sysinfo-snapshot/archive/refs/heads/master.zip -O /tmp/sysinfo_download/sysinfo.zip 2>/dev/null; then
         unzip -q -o /tmp/sysinfo_download/sysinfo.zip -d /tmp/sysinfo_download/
         SYSINFO_BIN=$(find /tmp/sysinfo_download -name "sysinfo-snapshot.py" -o -name "sysinfo-snapshot" | head -n 1)
-    elif git clone --depth 1 https://github.com/Mellanox/linux-sysinfo-snapshot.p.git /tmp/sysinfo_download/repo 2>/dev/null; then
+    elif git clone --depth 1 https://github.com/Mellanox/linux-sysinfo-snapshot.git /tmp/sysinfo_download/repo 2>/dev/null; then
         SYSINFO_BIN=$(find /tmp/sysinfo_download/repo -name "sysinfo-snapshot.py" -o -name "sysinfo-snapshot" | head -n 1)
     fi
 fi
@@ -144,8 +140,7 @@ fi
 # ------------------------------------------------------------------------------
 # 2. CX8 MST DUMP (Mellanox Software Tools)
 # ------------------------------------------------------------------------------
-echo -e "
-${YELLOW}[2/4] Running CX8 MST Dumps...${NC}"
+echo -e "\n${YELLOW}[2/4] Running CX8 MST Dumps...${NC}"
 
 # Start MST service if present
 if command -v mst &> /dev/null; then
@@ -200,8 +195,7 @@ fi
 # ------------------------------------------------------------------------------
 # 3. PCI DIAGNOSTICS, KERNEL & DCGM
 # ------------------------------------------------------------------------------
-echo -e "
-${YELLOW}[3/4] Collecting lspci, dmesg, and system diagnostics...${NC}"
+echo -e "\n${YELLOW}[3/4] Collecting lspci, dmesg, and system diagnostics...${NC}"
 
 # iv. lspci -tv
 if command -v lspci &> /dev/null; then
@@ -233,8 +227,7 @@ echo -e "${GREEN}[OK] System diagnostics collected.${NC}"
 # ------------------------------------------------------------------------------
 # 4. COMPRESS LOG FILES (SAVED TO /root/support_$hostname_$date.zip)
 # ------------------------------------------------------------------------------
-echo -e "
-${YELLOW}[4/4] Generating compressed archive in /root...${NC}"
+echo -e "\n${YELLOW}[4/4] Generating compressed archive in /root...${NC}"
 
 ZIP_FILENAME="support_${HOSTNAME}_${TIMESTAMP}.zip"
 FINAL_OUTPUT="/root/${ZIP_FILENAME}"
@@ -251,13 +244,11 @@ fi
 # Cleanup temporary download and build areas
 rm -rf "${WORKDIR}" /tmp/sysinfo_download 2>/dev/null || true
 
-echo -e "
-${GREEN}====================================================${NC}"
+echo -e "\n${GREEN}====================================================${NC}"
 echo -e "${GREEN}   LOG COLLECTION COMPLETED SUCCESSFULLY!           ${NC}"
 echo -e "${GREEN}====================================================${NC}"
 echo -e "Final output archive: ${YELLOW}${FINAL_OUTPUT}${NC}"
 if [ -f "${FINAL_OUTPUT}" ]; then
     echo -e "Archive size: $(du -sh "${FINAL_OUTPUT}" | cut -f1)"
 fi
-echo -e "
-Attach the file above directly to your Zendesk ticket."
+echo -e "\nAttach the file above directly to your Zendesk ticket."

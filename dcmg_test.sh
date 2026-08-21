@@ -11,6 +11,19 @@ if [ "$EUID" -ne 0 ]; then
   log_error "Este script precisa ser executado com sudo."
   exit 1
 fi
+
+# Bloqueia atualizações do Kernel do host antes de qualquer comando do APT
+CURRENT_KERNEL=$(uname -r)
+log_info "Bloqueando atualizações do kernel atual ($CURRENT_KERNEL) e metapacotes..."
+apt-mark hold \
+  linux-image-generic \
+  linux-headers-generic \
+  linux-generic \
+  "linux-image-$CURRENT_KERNEL" \
+  "linux-headers-$CURRENT_KERNEL" \
+  "linux-modules-$CURRENT_KERNEL" \
+  "linux-modules-extra-$CURRENT_KERNEL" >/dev/null 2>&1 || true
+
 # Configurações gerais do monitoramento
 INTERVALO_CHECAGEM=1    # Intervalo de verificação em segundos
 TESTE_CMD="dcgmi diag -r 4" # Comando de estresse completo nível 4 do DCGM
@@ -27,6 +40,7 @@ echo -e "    \e[32msudo screen -r teste_gpu\e[0m"
 echo -e " 2. Para auditar os logs salvos (mesmo se o teste já tiver acabado):"
 echo -e "    \e[32msudo cat $LOG_SAIDA_FINAL\e[0m"
 echo -e "\e[36m============================================================\e[0m"
+
 # ==============================================================================
 # CAMADA INTELIGENTE DO SCREEN (EXECUÇÃO PERSISTENTE)
 # ==============================================================================
@@ -42,6 +56,7 @@ if [ "$dentro_do_screen" = false ]; then
   # Instala a dependência 'screen' caso ela não esteja instalada no servidor
   if ! command -v screen &> /dev/null; then
     log_warn "O pacote 'screen' não foi encontrado. Instalando dependência..."
+    export DEBIAN_FRONTEND=noninteractive
     apt-get update -y && apt-get install -y screen
   fi
 
@@ -134,24 +149,6 @@ for (( i=0; i<QTD_GPUS; i++ )); do
     log_warn "GPU $i: Não foi possível ativar o Persistence Mode. Continuando..."
   fi
 done
-
-# Configurações gerais do monitoramento
-INTERVALO_CHECAGEM=1    # Intervalo de verificação em segundos
-TESTE_CMD="dcgmi diag -r 4" # Comando de estresse completo nível 4 do DCGM
-LOG_ERRO_DCGM="/tmp/dcgm_teste_erro.log" # Log temporário interno
-LOG_SAIDA_FINAL="/var/log/dcgm_test_output.log" # Log permanente de auditoria do teste
-
-
-# INSTRUÇÕES DE RECONEXÃO E AUDITORIA AO FINALIZAR COM SUCESSO OU ERRO
-echo -e "\n\e[36m============================================================\e[0m"
-echo -e " \e[1mINSTRUÇÕES DE RECONEXÃO E AUDITORIA DE TESTES:\e[0m"
-echo -e " Se você se desconectar da sessão screen (\e[33mCtrl+A e depois D\e[0m):"
-echo -e " 1. Para voltar ao terminal em tempo real e ver o teste rodando:"
-echo -e "    \e[32msudo screen -r teste_gpu\e[0m"
-echo -e " 2. Para auditar os logs salvos (mesmo se o teste já tiver acabado):"
-echo -e "    \e[32msudo cat $LOG_SAIDA_FINAL\e[0m"
-echo -e "\e[36m============================================================\e[0m"
-
 
 rm -f "$LOG_ERRO_DCGM"
 

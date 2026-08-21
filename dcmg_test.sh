@@ -30,7 +30,6 @@ TESTE_CMD="dcgmi diag -r 4" # Comando de estresse completo nível 4 do DCGM
 LOG_ERRO_DCGM="/tmp/dcgm_teste_erro.log" # Log temporário interno
 LOG_SAIDA_FINAL="/var/log/dcgm_test_output.log" # Log permanente de auditoria do teste
 
-
 # INSTRUÇÕES DE RECONEXÃO E AUDITORIA AO FINALIZAR COM SUCESSO OU ERRO
 echo -e "\n\e[36m============================================================\e[0m"
 echo -e " \e[1mINSTRUÇÕES DE RECONEXÃO E AUDITORIA DE TESTES:\e[0m"
@@ -44,7 +43,6 @@ echo -e "\e[36m============================================================\e[0m
 # ==============================================================================
 # CAMADA INTELIGENTE DO SCREEN (EXECUÇÃO PERSISTENTE)
 # ==============================================================================
-# Verificação dupla e robusta: variável STY ou se o terminal atual contém "screen"
 dentro_do_screen=false
 if [ -n "$STY" ] || [[ "$TERM" == *"screen"* ]]; then
   dentro_do_screen=true
@@ -53,7 +51,6 @@ fi
 if [ "$dentro_do_screen" = false ]; then
   log_info "Detectado que o script não está rodando dentro de uma sessão screen."
   
-  # Instala a dependência 'screen' caso ela não esteja instalada no servidor
   if ! command -v screen &> /dev/null; then
     log_warn "O pacote 'screen' não foi encontrado. Instalando dependência..."
     export DEBIAN_FRONTEND=noninteractive
@@ -68,14 +65,13 @@ if [ "$dentro_do_screen" = false ]; then
 
   sleep 1.5
 
-  # O uso do "sudo -E" preserva o ambiente e impede o loop infinito
   exec sudo screen -S "$NOME_SESSAO" bash -c "sudo -E $SCRIPT_PATH $ARGUMENTOS; echo -e '\nPressione qualquer tecla para fechar esta screen...'; read -n 1"
 fi
 # ==============================================================================
 
 # 2. Verifica se as ferramentas de GPU estão disponíveis
-if ! command -v nvidia-smi &> /dev/null; then
-  log_error "O comando 'nvidia-smi' não foi encontrado. Os drivers da NVIDIA estão instalados?"
+if ! nvidia-smi &> /dev/null; then
+  log_error "O comando 'nvidia-smi' falhou. O driver da NVIDIA não está rodando ou precisa ser recarregado."
   exit 1
 fi
 
@@ -132,7 +128,7 @@ fi
 
 # 4. Detecção de GPUs e Ativação do Persistence Mode
 log_info "Detectando GPUs instaladas no sistema..."
-QTD_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader | wc -l)
+QTD_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | wc -l)
 
 if [ "$QTD_GPUS" -eq 0 ]; then
   log_error "Nenhuma GPU NVIDIA foi detectada pelo driver."
@@ -152,31 +148,42 @@ done
 
 rm -f "$LOG_ERRO_DCGM"
 
-# 5. Inicia o teste do DCGM redirecionando toda a saída
+# 5. Inicia o teste do DCGM
 log_info "Perfil selecionado: \e[1m$NOME_PERFIL\e[0m"
 log_info "Iniciando o teste de estresse do DCGM: '$TESTE_CMD'..."
-# Salvando tudo em um log definitivo para leitura posterior
 $TESTE_CMD > "$LOG_SAIDA_FINAL" 2>&1 &
 PID_TESTE=$!
 
-# Link simbólico temporário para o leitor de erros interno continuar idêntico
 ln -sf "$LOG_SAIDA_FINAL" "$LOG_ERRO_DCGM"
 
 log_success "Teste iniciado com sucesso! PID do processo: $PID_TESTE"
 log_info "Para se desconectar com segurança sem parar o teste, aperte: Ctrl+A e depois D"
 log_info "Monitorando temperaturas... Limite seguro definido em: \e[1;31m${LIMITE_TEMP}°C\e[0m"
 
-# Flag de controle térmico
 FOI_INTERROMPIDO_POR_TEMP=false
 
-# 6. Loop de monitoramento em tempo real
+# 6. Loop de monitoramento em tempo real com validação estrita
 while kill -0 "$PID_TESTE" 2>/dev/null; do
-  TEMPERATURAS=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits)
+  # Captura as temperaturas tratando falha de execução do comando
+  if ! TEMPERATURAS=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null); then
+    echo ""
+    log_error "FALHA CRÍTICA: Perda de comunicação com o driver NVIDIA (nvidia-smi parou de responder)." | tee -a "$LOG_SAIDA_FINAL"
+    kill -9 "$PID_TESTE" 2>/dev/null
+    exit 1
+  fi
   
   GPU_ID=0
   STATUS_LINE=""
   
   for TEMP in $TEMPERATURAS; do
+    # Valida se o valor retornado é realmente um número inteiro
+    if ! [[ "$TEMP" =~ ^[0-9]+$ ]]; then
+      echo ""
+      log_error "FALHA CRÍTICA: Resposta inválida ao ler temperatura ($TEMP). O driver da GPU falhou." | tee -a "$LOG_SAIDA_FINAL"
+      kill -9 "$PID_TESTE" 2>/dev/null
+      exit 1
+    fi
+
     if [ -z "$STATUS_LINE" ]; then
       STATUS_LINE="GPU $GPU_ID: ${TEMP}°C"
     else
@@ -196,14 +203,6 @@ while kill -0 "$PID_TESTE" 2>/dev/null; do
       
       log_success "Teste interrompido com segurança. Aguardando resfriamento das placas." | tee -a "$LOG_SAIDA_FINAL"
       rm -f "$LOG_ERRO_DCGM"
-      
-      # INSTRUÇÕES DE RECONEXÃO (Caso caia durante o aborto térmico)
-      echo -e "\n\e[36m============================================================\e[0m"
-      echo -e " \e[1mCOMO VISUALIZAR OS DETALHES DESTE ABORTO TÉRMICO:\e[0m"
-      echo -e " O teste foi parado na força bruta pelo script."
-      echo -e " Verifique o histórico completo de logs com o comando:"
-      echo -e "   \e[32msudo cat $LOG_SAIDA_FINAL\e[0m"
-      echo -e "\e[36m============================================================\e[0m"
       exit 1
     fi
     
@@ -217,7 +216,7 @@ done
 wait "$PID_TESTE"
 STATUS_FINAL=$?
 
-echo "" # Quebra de linha pós-teste
+echo ""
 
 if [ $STATUS_FINAL -eq 0 ]; then
   log_success "O teste do DCGM foi concluído com sucesso e todas as GPUs operaram em temperaturas seguras!" | tee -a "$LOG_SAIDA_FINAL"

@@ -27,7 +27,6 @@ wait_for_apt_locks() {
   local segundos_esperando=0
   local imprimiu_aviso=false
 
-  # Verifica apenas se os arquivos de trava do apt/dpkg estão bloqueados fisicamente
   while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
     
     if [ "$imprimiu_aviso" = false ]; then
@@ -36,14 +35,12 @@ wait_for_apt_locks() {
       imprimiu_aviso=true
     fi
 
-    # Cronômetro na tela para você ver que o script continua ativo
     echo -ne "\r\e[K[AGUARDANDO] Arquivos travados. Tempo decorrido: ${segundos_esperando}s..."
     
     sleep 2
     segundos_esperando=$((segundos_esperando + 2))
   done
 
-  # Se precisou esperar, quebra a linha para o próximo log ficar limpo
   if [ "$imprimiu_aviso" = true ]; then
     echo ""
     log_success "Gerenciador de pacotes liberado após ${segundos_esperando}s!"
@@ -59,7 +56,20 @@ if ! ping -q -c 1 -W 5 google.com >/dev/null 2>&1; then
   exit 1
 fi
 
-# 4. Limpeza inicial de pacotes conflitantes do Data Center GPU Manager
+# 4. Bloqueia a atualização de pacotes relacionados ao Kernel
+wait_for_apt_locks
+CURRENT_KERNEL=$(uname -r)
+log_info "Bloqueando atualizações do kernel atual ($CURRENT_KERNEL) e metapacotes de kernel..."
+apt-mark hold \
+  linux-image-generic \
+  linux-headers-generic \
+  linux-generic \
+  "linux-image-$CURRENT_KERNEL" \
+  "linux-headers-$CURRENT_KERNEL" \
+  "linux-modules-$CURRENT_KERNEL" \
+  "linux-modules-extra-$CURRENT_KERNEL" >/dev/null 2>&1 || true
+
+# 5. Limpeza inicial de pacotes conflitantes do Data Center GPU Manager
 wait_for_apt_locks
 log_info "Removendo pacotes potencialmente conflitantes do datacenter-gpu-manager..."
 if dpkg-query -W -f='${Status}' datacenter-gpu-manager 2>/dev/null | grep -q "ok installed"; then
@@ -69,7 +79,7 @@ if dpkg-query -W -f='${Status}' datacenter-gpu-manager-config 2>/dev/null | grep
   apt-get purge --yes -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" datacenter-gpu-manager-config || log_warn "Falha ao expurgar o datacenter-gpu-manager-config, prosseguindo de qualquer forma."
 fi
 
-# 5. Instala todas as dependências básicas e ferramentas de compilação
+# 6. Instala todas as dependências básicas e ferramentas de compilação
 wait_for_apt_locks
 log_info "Atualizando os repositórios de pacotes do sistema..."
 apt-get update -y
@@ -89,21 +99,19 @@ apt-get install -y \
   alsa-utils \
   snapd
 
-# 6. Trata os cabeçalhos do kernel (kernel headers) com segurança
+# 7. Trata os cabeçalhos do kernel (kernel headers) estritamente para a versão ativa
 wait_for_apt_locks
-CURRENT_KERNEL=$(uname -r)
-log_info "Instalando cabeçalhos do kernel para a versão atual: $CURRENT_KERNEL..."
+log_info "Instalando cabeçalhos do kernel apenas para a versão ativa: $CURRENT_KERNEL..."
 if ! apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" linux-headers-"$CURRENT_KERNEL"; then
-  log_warn "Não foi possível encontrar cabeçalhos específicos para $CURRENT_KERNEL. Tentando alternativa com cabeçalhos genéricos..."
-  apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" linux-headers-generic
+  log_warn "Não foi possível encontrar linux-headers-$CURRENT_KERNEL. O DKMS tentará usar os arquivos existentes sem atualizar o kernel."
 fi
 
-# 7. Instala os drivers de GPU recomendados
+# 8. Instala os drivers de GPU recomendados
 wait_for_apt_locks
 log_info "Executando a instalação automática de drivers do Ubuntu..."
 ubuntu-drivers autoinstall
 
-# 8. Baixa e registra a chave do repositório oficial da NVIDIA CUDA
+# 9. Baixa e registra a chave do repositório oficial da NVIDIA CUDA
 wait_for_apt_locks
 log_info "Configurando os repositórios oficiais da NVIDIA CUDA..."
 KEYRING_DEB="cuda-keyring_1.1-1_all.deb"
@@ -117,16 +125,16 @@ fi
 dpkg -i --force-confdef --force-confold /tmp/"$KEYRING_DEB"
 rm -f /tmp/"$KEYRING_DEB"
 
-# 9. Atualiza os repositórios novamente para buscar os metadados do CUDA
+# 10. Atualiza os repositórios novamente para buscar os metadados do CUDA
 wait_for_apt_locks
 log_info "Atualizando a lista de pacotes com os repositórios da NVIDIA inclusos..."
 apt-get update -y
 
-# 10. Instala o CUDA Toolkit 13.3
+# 11. Instala o CUDA Toolkit 13.3
 log_info "Instalando o CUDA Toolkit 13.3..."
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" cuda-toolkit-13-3
 
-# 11. Instalação do Datacenter GPU Manager compatível com CUDA 13
+# 12. Instalação do Datacenter GPU Manager compatível com CUDA 13
 wait_for_apt_locks
 log_info "Instalando o Datacenter GPU Manager para CUDA $CUDA_VERSION..."
 apt-get install --yes \
@@ -135,13 +143,13 @@ apt-get install --yes \
                 -o Dpkg::Options::="--force-confold" \
                 datacenter-gpu-manager-4-cuda${CUDA_VERSION}
 
-# 12. Instala o monitor nvtop via Snap
-log_info "Instalando o nvtop via Snap..."
+# 13. Instala o monitor nvtop via Snap
+log_info "Instalando o nvtop e gpu-burn via Snap..."
 snap wait system seed
 snap install nvtop
 snap install gpu-burn
 
-# 13. LIMPEZA PÓS-INSTALAÇÃO (Remove apenas resíduos desnecessários)
+# 14. LIMPEZA PÓS-INSTALAÇÃO
 wait_for_apt_locks
 log_info "Realizando a limpeza pós-instalação de pacotes órfãos..."
 apt-get autoremove -y

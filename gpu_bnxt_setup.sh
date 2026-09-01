@@ -1,22 +1,26 @@
+```bash
 #!/usr/bin/env bash
 
 ###############################################################################
-# NVIDIA / CUDA / DCGM / DKMS / Broadcom bnxt_en Installer
+# NVIDIA + CUDA 13.3 + DCGM 4 + DKMS + Broadcom bnxt_en
 #
-# Sistema:
-#   Ubuntu 24.04 LTS
+# Ubuntu 24.04 LTS
 #
-# Objetivos:
-#   - Manter EXATAMENTE o kernel atualmente em execução
-#   - Não atualizar o kernel
-#   - Instalar headers do kernel atual
-#   - Instalar NVIDIA via DKMS
-#   - Instalar CUDA Toolkit 13.3
-#   - Instalar NVIDIA DCGM 4 para CUDA 13
-#   - Validar Broadcom bnxt_en
-#   - Recompilar módulos DKMS para o kernel atual
-#   - Não executar apt autoremove
-#   - Não reiniciar se houver erro crítico
+# OBJETIVOS
+# -----------------------------------------------------------------------------
+# - Preservar o kernel atualmente em execução
+# - Não instalar outro kernel
+# - Não atualizar/trocar o kernel ativo
+# - Instalar exatamente os headers do kernel ativo
+# - Instalar NVIDIA usando DKMS
+# - Detectar GPUs NVIDIA por PCI Vendor ID 10de
+# - Validar todas as GPUs NVIDIA
+# - Instalar CUDA Toolkit 13.3
+# - Instalar DCGM 4 para CUDA 13
+# - Preservar/validar Broadcom bnxt_en
+# - Suportar bnxt-en-dkms
+# - Não executar apt autoremove
+# - Abortar antes do reboot se houver erro crítico
 #
 ###############################################################################
 
@@ -25,6 +29,8 @@ set -Eeuo pipefail
 ###############################################################################
 # CONFIGURAÇÃO
 ###############################################################################
+
+EXPECTED_UBUNTU="24.04"
 
 CUDA_MAJOR="13"
 CUDA_VERSION="13-3"
@@ -38,25 +44,27 @@ CUDA_KEYRING_PACKAGE="cuda-keyring_${CUDA_KEYRING_VERSION}_all.deb"
 CUDA_REPO_BASE="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64"
 CUDA_KEYRING_URL="${CUDA_REPO_BASE}/${CUDA_KEYRING_PACKAGE}"
 
-# Reinício automático no final:
-#   1 = reboot automático
-#   0 = não reiniciar
-AUTO_REBOOT=1
+# Seu hardware NVIDIA atual:
+EXPECTED_NVIDIA_VENDOR="10de"
+EXPECTED_NVIDIA_DEVICE="2bb5"
+EXPECTED_GPU_COUNT=8
 
 # Broadcom:
-# Se bnxt-en-dkms estiver instalado/disponível, tenta reconstruí-lo.
 ENABLE_BNXT_DKMS=1
 
-# Snap:
+# Ferramentas opcionais:
 INSTALL_NVTOP=1
 INSTALL_GPU_BURN=1
 
-# Se Secure Boot estiver habilitado, instalação DKMS não interativa pode
-# resultar em módulo que não carrega sem assinatura/MOK.
-#
-# 0 = abortar se Secure Boot estiver habilitado
-# 1 = permitir continuar mesmo com Secure Boot
+# Secure Boot:
+# 0 = aborta se Secure Boot estiver habilitado
+# 1 = continua mesmo com Secure Boot habilitado
 ALLOW_SECURE_BOOT=0
+
+# Reboot:
+# 1 = reinicia automaticamente ao final
+# 0 = não reinicia
+AUTO_REBOOT=1
 
 ###############################################################################
 # VARIÁVEIS
@@ -65,7 +73,7 @@ ALLOW_SECURE_BOOT=0
 CURRENT_KERNEL="$(uname -r)"
 ARCH="$(dpkg --print-architecture)"
 
-LOG_FILE="/var/log/gpu-stack-install.log"
+LOG_FILE="/var/log/nvidia-cuda-dcgm-install.log"
 
 APT_OPTIONS=(
     -y
@@ -97,39 +105,40 @@ log_error() {
 }
 
 separator() {
-    echo "-------------------------------------------------------------------------------" \
+    echo "===============================================================================" \
         | tee -a "$LOG_FILE"
 }
 
 ###############################################################################
-# TRATAMENTO DE ERROS
+# ERROR HANDLER
 ###############################################################################
 
 error_handler() {
 
     local exit_code=$?
-    local line_number=$1
-
-    separator
-    log_error "Falha crítica."
-    log_error "Linha: $line_number"
-    log_error "Código de saída: $exit_code"
-    log_error "Kernel preservado: $CURRENT_KERNEL"
-    log_error "Log completo: $LOG_FILE"
+    local line_number="$1"
 
     separator
 
-    log_info "Estado atual do DKMS:"
+    log_error "FALHA CRÍTICA."
+    log_error "Linha       : $line_number"
+    log_error "Exit code   : $exit_code"
+    log_error "Kernel      : $CURRENT_KERNEL"
+    log_error "Log         : $LOG_FILE"
+
+    separator
+
+    log_info "DKMS status:"
     dkms status 2>&1 | tee -a "$LOG_FILE" || true
 
     separator
 
-    log_info "Pacotes quebrados:"
+    log_info "DPKG audit:"
     dpkg --audit 2>&1 | tee -a "$LOG_FILE" || true
 
     separator
 
-    log_error "O sistema NÃO será reiniciado automaticamente."
+    log_error "O sistema NÃO será reiniciado."
 
     exit "$exit_code"
 }
@@ -141,77 +150,39 @@ trap 'error_handler $LINENO' ERR
 ###############################################################################
 
 if [[ "$EUID" -ne 0 ]]; then
+
+    echo
     echo "[ERRO] Execute este script como root:"
     echo
     echo "sudo $0"
+    echo
+
     exit 1
 fi
+
+###############################################################################
+# LOG
+###############################################################################
 
 touch "$LOG_FILE"
 chmod 600 "$LOG_FILE"
 
+###############################################################################
+# HEADER
+###############################################################################
+
 separator
-log_info "Iniciando instalação GPU."
-log_info "Kernel atual : $CURRENT_KERNEL"
-log_info "Arquitetura  : $ARCH"
-log_info "Log           : $LOG_FILE"
+
+log_info "NVIDIA / CUDA / DCGM / DKMS INSTALLER"
+log_info "Ubuntu esperado : $EXPECTED_UBUNTU"
+log_info "Kernel atual    : $CURRENT_KERNEL"
+log_info "Arquitetura     : $ARCH"
+log_info "Log             : $LOG_FILE"
+
 separator
 
 ###############################################################################
-# FUNÇÃO APT LOCK
-###############################################################################
-
-wait_for_apt_locks() {
-
-    local waited=0
-    local warning_printed=0
-
-    local locks=(
-        /var/lib/dpkg/lock
-        /var/lib/dpkg/lock-frontend
-        /var/lib/apt/lists/lock
-        /var/cache/apt/archives/lock
-    )
-
-    while fuser "${locks[@]}" >/dev/null 2>&1; do
-
-        if [[ "$warning_printed" -eq 0 ]]; then
-            log_warn "APT/DPKG está sendo utilizado por outro processo."
-            log_info "Aguardando liberação..."
-            warning_printed=1
-        fi
-
-        echo -ne \
-            "\r\e[K[AGUARDANDO] APT ocupado. Tempo decorrido: ${waited}s"
-
-        sleep 2
-        waited=$((waited + 2))
-
-    done
-
-    if [[ "$warning_printed" -eq 1 ]]; then
-        echo
-        log_success "APT liberado após ${waited}s."
-    fi
-}
-
-###############################################################################
-# FUNÇÃO APT INSTALL
-###############################################################################
-
-apt_install() {
-
-    wait_for_apt_locks
-
-    log_info "Instalando: $*"
-
-    apt-get install \
-        "${APT_OPTIONS[@]}" \
-        "$@"
-}
-
-###############################################################################
-# VERIFICA UBUNTU
+# VALIDAR UBUNTU
 ###############################################################################
 
 log_info "Validando sistema operacional..."
@@ -225,71 +196,104 @@ fi
 source /etc/os-release
 
 if [[ "${ID:-}" != "ubuntu" ]]; then
-    log_error "Sistema detectado: ${ID:-desconhecido}"
-    log_error "Este script suporta somente Ubuntu."
+    log_error "Sistema não é Ubuntu."
+    log_error "ID detectado: ${ID:-unknown}"
     exit 1
 fi
 
-if [[ "${VERSION_ID:-}" != "24.04" ]]; then
-    log_error "Ubuntu ${VERSION_ID:-desconhecido} detectado."
-    log_error "Este script foi preparado especificamente para Ubuntu 24.04."
+if [[ "${VERSION_ID:-}" != "$EXPECTED_UBUNTU" ]]; then
+    log_error "Versão Ubuntu incompatível."
+    log_error "Detectado: ${VERSION_ID:-unknown}"
+    log_error "Esperado : $EXPECTED_UBUNTU"
     exit 1
 fi
 
 log_success "Ubuntu 24.04 confirmado."
 
 ###############################################################################
-# ARQUITETURA
+# VALIDAR ARQUITETURA
 ###############################################################################
 
 if [[ "$ARCH" != "amd64" ]]; then
-    log_error "Arquitetura detectada: $ARCH"
-    log_error "Este script está configurado para NVIDIA CUDA x86_64/amd64."
+    log_error "Arquitetura incompatível: $ARCH"
+    log_error "CUDA NVIDIA x86_64 requer amd64 neste script."
     exit 1
 fi
 
-###############################################################################
-# INTERNET
-#
-# Não usa ping porque ICMP pode estar bloqueado.
-###############################################################################
-
-log_info "Verificando acesso HTTPS ao repositório NVIDIA..."
-
-if ! curl \
-        --silent \
-        --show-error \
-        --fail \
-        --head \
-        --connect-timeout 10 \
-        --max-time 20 \
-        "$CUDA_REPO_BASE/" \
-        >/dev/null; then
-
-    log_error "Não foi possível acessar:"
-    log_error "$CUDA_REPO_BASE/"
-    exit 1
-fi
-
-log_success "Conectividade HTTPS confirmada."
+log_success "Arquitetura amd64 confirmada."
 
 ###############################################################################
-# VERIFICA ESTADO DO DPKG
+# APT LOCK
+###############################################################################
+
+wait_for_apt_locks() {
+
+    local waited=0
+    local warning=0
+
+    local locks=(
+        /var/lib/dpkg/lock
+        /var/lib/dpkg/lock-frontend
+        /var/lib/apt/lists/lock
+        /var/cache/apt/archives/lock
+    )
+
+    while fuser "${locks[@]}" >/dev/null 2>&1; do
+
+        if [[ "$warning" -eq 0 ]]; then
+            log_warn "APT/DPKG está ocupado."
+            log_info "Aguardando liberação dos locks..."
+            warning=1
+        fi
+
+        echo -ne \
+            "\r\e[K[AGUARDANDO] APT ocupado - ${waited}s"
+
+        sleep 2
+        waited=$((waited + 2))
+
+    done
+
+    if [[ "$warning" -eq 1 ]]; then
+        echo
+        log_success "APT liberado após ${waited}s."
+    fi
+}
+
+###############################################################################
+# APT INSTALL
+###############################################################################
+
+apt_install() {
+
+    wait_for_apt_locks
+
+    log_info "apt-get install: $*"
+
+    apt-get install \
+        "${APT_OPTIONS[@]}" \
+        "$@"
+}
+
+###############################################################################
+# DPKG CHECK
 ###############################################################################
 
 separator
-log_info "Verificando integridade inicial do DPKG..."
+log_info "Verificando estado do DPKG..."
 
 DPKG_AUDIT="$(dpkg --audit || true)"
 
 if [[ -n "$DPKG_AUDIT" ]]; then
 
-    log_error "DPKG possui pacotes pendentes/quebrados:"
+    log_error "Existem pacotes quebrados ou configuração pendente:"
     echo "$DPKG_AUDIT" | tee -a "$LOG_FILE"
 
-    log_error "Corrija os pacotes antes de executar este instalador."
-    log_error "Não executarei automaticamente 'apt --fix-broken install',"
-    log_error "pois isso poderia instalar um kernel diferente."
+    log_error "O script NÃO executará automaticamente:"
+    log_error "apt --fix-broken install"
+
+    log_error "Isso é proposital para impedir que o APT instale"
+    log_error "um kernel inesperado."
 
     exit 1
 fi
@@ -307,93 +311,62 @@ SECURE_BOOT="unknown"
 
 if command -v mokutil >/dev/null 2>&1; then
 
-    if mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot enabled"; then
+    if mokutil --sb-state 2>/dev/null \
+        | grep -qi "SecureBoot enabled"; then
+
         SECURE_BOOT="enabled"
-    elif mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot disabled"; then
+
+    elif mokutil --sb-state 2>/dev/null \
+        | grep -qi "SecureBoot disabled"; then
+
         SECURE_BOOT="disabled"
+
     fi
 
 fi
 
-case "$SECURE_BOOT" in
+if [[ "$SECURE_BOOT" == "enabled" ]]; then
 
-    enabled)
+    log_warn "Secure Boot está habilitado."
 
-        log_warn "Secure Boot está HABILITADO."
+    if [[ "$ALLOW_SECURE_BOOT" -ne 1 ]]; then
 
-        if [[ "$ALLOW_SECURE_BOOT" -ne 1 ]]; then
+        log_error "Secure Boot habilitado pode impedir o carregamento"
+        log_error "dos módulos NVIDIA/Broadcom compilados por DKMS."
 
-            log_error "Este instalador utilizará módulos DKMS."
-            log_error "Com Secure Boot habilitado, os módulos podem exigir"
-            log_error "assinatura e enrollment de chave MOK."
+        log_error "Instalação interrompida."
 
-            log_error "Por segurança, instalação interrompida."
+        log_info "Se você realmente precisa continuar:"
+        log_info "edite ALLOW_SECURE_BOOT=1"
 
-            log_info "Se a política do servidor permitir continuar, altere:"
-            log_info "ALLOW_SECURE_BOOT=1"
-
-            exit 1
-        fi
-
-        log_warn "ALLOW_SECURE_BOOT=1: continuando."
-
-        ;;
-
-    disabled)
-
-        log_success "Secure Boot desabilitado."
-
-        ;;
-
-    *)
-
-        log_warn "Não foi possível determinar o estado do Secure Boot."
-
-        ;;
-
-esac
-
-###############################################################################
-# CONGELA METAPACOTES DO KERNEL ANTES DAS INSTALAÇÕES GERAIS
-###############################################################################
-
-separator
-log_info "Protegendo metapacotes do kernel..."
-
-KERNEL_META_PACKAGES=(
-    linux-generic
-    linux-image-generic
-    linux-headers-generic
-)
-
-for pkg in "${KERNEL_META_PACKAGES[@]}"; do
-
-    if dpkg-query -W \
-        -f='${db:Status-Abbrev}' "$pkg" \
-        2>/dev/null | grep -q '^ii'; then
-
-        apt-mark hold "$pkg" >/dev/null
-
-        log_success "HOLD aplicado: $pkg"
-    else
-        log_info "Metapacote não instalado: $pkg"
+        exit 1
     fi
 
-done
+    log_warn "ALLOW_SECURE_BOOT=1."
+    log_warn "Continuando mesmo com Secure Boot."
+
+elif [[ "$SECURE_BOOT" == "disabled" ]]; then
+
+    log_success "Secure Boot desabilitado."
+
+else
+
+    log_warn "Estado do Secure Boot não pôde ser determinado."
+
+fi
 
 ###############################################################################
 # APT UPDATE
 ###############################################################################
 
 separator
+log_info "Atualizando índices APT..."
+
 wait_for_apt_locks
-
-log_info "Atualizando índices do APT..."
-
 apt-get update
 
 ###############################################################################
-# FERRAMENTAS BÁSICAS
+# INSTALA FERRAMENTAS BÁSICAS
 ###############################################################################
 
 separator
@@ -402,7 +375,6 @@ log_info "Instalando ferramentas básicas..."
 apt_install \
     build-essential \
     dkms \
-    software-properties-common \
     ca-certificates \
     curl \
     wget \
@@ -414,25 +386,28 @@ apt_install \
     mokutil \
     kmod \
     initramfs-tools \
+    software-properties-common \
     alsa-utils \
     snapd
 
 ###############################################################################
-# HEADERS EXATOS DO KERNEL EM EXECUÇÃO
+# HEADERS EXATOS DO KERNEL
 ###############################################################################
 
 separator
-log_info "Instalando headers EXATAMENTE para:"
+
+log_info "Verificando headers do kernel:"
 log_info "$CURRENT_KERNEL"
 
 if ! apt-cache show \
-        "linux-headers-${CURRENT_KERNEL}" \
-        >/dev/null 2>&1; then
+    "linux-headers-${CURRENT_KERNEL}" \
+    >/dev/null 2>&1; then
 
-    log_error "Headers não encontrados:"
+    log_error "Headers não disponíveis:"
     log_error "linux-headers-${CURRENT_KERNEL}"
 
-    log_error "Não vou instalar headers de outro kernel."
+    log_error "O script NÃO instalará headers de outro kernel."
+
     exit 1
 fi
 
@@ -440,56 +415,106 @@ apt_install \
     "linux-headers-${CURRENT_KERNEL}"
 
 ###############################################################################
-# VALIDA BUILD DIRECTORY
+# VALIDAR KERNEL BUILD
 ###############################################################################
 
 KERNEL_BUILD="/lib/modules/${CURRENT_KERNEL}/build"
 
-if [[ ! -e "$KERNEL_BUILD/Makefile" ]]; then
-    log_error "Build tree do kernel não encontrado:"
+if [[ ! -f "$KERNEL_BUILD/Makefile" ]]; then
+
+    log_error "Kernel build tree inválido:"
     log_error "$KERNEL_BUILD"
+
     exit 1
 fi
 
-log_success "Headers do kernel atual disponíveis."
+log_success "Kernel build tree OK."
 
 ###############################################################################
-# HOLD DOS PACOTES EXATOS DO KERNEL
+# HOLD DOS METAPACOTES
 ###############################################################################
 
 separator
-log_info "Congelando pacotes EXATOS do kernel atual..."
+log_info "Aplicando HOLD aos metapacotes do kernel..."
 
-KERNEL_PACKAGES=(
+for pkg in \
+    linux-generic \
+    linux-image-generic \
+    linux-headers-generic; do
+
+    if dpkg-query \
+        -W \
+        -f='${db:Status-Abbrev}' \
+        "$pkg" \
+        2>/dev/null \
+        | grep -q '^ii'; then
+
+        apt-mark hold "$pkg" >/dev/null
+
+        log_success "HOLD: $pkg"
+
+    else
+
+        log_info "Não instalado: $pkg"
+
+    fi
+
+done
+
+###############################################################################
+# HOLD DOS PACOTES DO KERNEL ATUAL
+###############################################################################
+
+separator
+log_info "Aplicando HOLD aos pacotes do kernel atual..."
+
+CURRENT_KERNEL_PACKAGES=(
     "linux-image-${CURRENT_KERNEL}"
     "linux-headers-${CURRENT_KERNEL}"
     "linux-modules-${CURRENT_KERNEL}"
     "linux-modules-extra-${CURRENT_KERNEL}"
 )
 
-for pkg in "${KERNEL_PACKAGES[@]}"; do
+for pkg in "${CURRENT_KERNEL_PACKAGES[@]}"; do
 
-    if dpkg-query -W \
-        -f='${db:Status-Abbrev}' "$pkg" \
-        2>/dev/null | grep -q '^ii'; then
+    if dpkg-query \
+        -W \
+        -f='${db:Status-Abbrev}' \
+        "$pkg" \
+        2>/dev/null \
+        | grep -q '^ii'; then
 
         apt-mark hold "$pkg" >/dev/null
 
         log_success "HOLD: $pkg"
+
     else
+
         log_info "Não instalado: $pkg"
+
     fi
 
 done
 
 ###############################################################################
-# REGISTRA KERNEL ORIGINAL
+# SALVA ESTADO DOS KERNELS
 ###############################################################################
 
-ORIGINAL_KERNEL="$CURRENT_KERNEL"
+separator
+log_info "Registrando estado inicial dos kernels..."
+
+dpkg-query \
+    -W \
+    -f='${Package}\t${Version}\t${Status}\n' \
+    'linux-image*' \
+    'linux-headers*' \
+    'linux-modules*' \
+    2>/dev/null \
+    | tee -a "$LOG_FILE" \
+    || true
 
 ###############################################################################
-# CONFIGURA REPOSITÓRIO CUDA
+# CONFIGURA NVIDIA CUDA REPOSITORY
 ###############################################################################
 
 separator
@@ -505,8 +530,14 @@ curl \
     --retry 5 \
     --retry-delay 5 \
     --connect-timeout 15 \
+    --max-time 60 \
     "$CUDA_KEYRING_URL" \
     --output "$TMP_KEYRING"
+
+if [[ ! -s "$TMP_KEYRING" ]]; then
+    log_error "Arquivo cuda-keyring vazio."
+    exit 1
+fi
 
 dpkg \
     --install \
@@ -517,127 +548,185 @@ dpkg \
 rm -f "$TMP_KEYRING"
 
 wait_for_apt_locks
-
 apt-get update
 
-log_success "Repositório NVIDIA CUDA configurado."
+log_success "Repositório NVIDIA configurado."
 
 ###############################################################################
-# GARANTE QUE CUDA 13.3 EXISTE
+# VERIFICA CUDA
 ###############################################################################
 
 separator
-log_info "Verificando pacote $CUDA_TOOLKIT_PACKAGE..."
+log_info "Verificando $CUDA_TOOLKIT_PACKAGE..."
 
-if ! apt-cache show "$CUDA_TOOLKIT_PACKAGE" >/dev/null 2>&1; then
+if ! apt-cache show \
+    "$CUDA_TOOLKIT_PACKAGE" \
+    >/dev/null 2>&1; then
+
     log_error "$CUDA_TOOLKIT_PACKAGE não está disponível."
+
     exit 1
 fi
 
 log_success "$CUDA_TOOLKIT_PACKAGE disponível."
 
 ###############################################################################
-# DETECTA GPU NVIDIA
+# DETECTA NVIDIA POR PCI ID
 ###############################################################################
 
 separator
-log_info "Detectando dispositivos NVIDIA..."
+log_info "Detectando GPUs NVIDIA por PCI ID..."
 
-if ! lspci -nn | grep -qi NVIDIA; then
-    log_error "Nenhuma GPU NVIDIA foi detectada pelo PCI."
+PCI_ALL="$(
+    lspci -Dnn 2>/dev/null || true
+)"
+
+echo "$PCI_ALL" >> "$LOG_FILE"
+
+NVIDIA_DEVICES="$(
+    echo "$PCI_ALL" \
+        | grep -Ei '(^|[[:space:]])[0-9a-f]{4}:10de:' \
+        || true
+)"
+
+if [[ -z "$NVIDIA_DEVICES" ]]; then
+
+    log_error "Nenhum dispositivo PCI com vendor NVIDIA (10de) encontrado."
+
+    log_info "Saída completa do lspci:"
+    echo "$PCI_ALL" | tee -a "$LOG_FILE"
+
     exit 1
 fi
 
-lspci -nn \
-    | grep -i NVIDIA \
-    | tee -a "$LOG_FILE"
+###############################################################################
+# MOSTRA GPUs NVIDIA
+###############################################################################
 
-log_success "GPU NVIDIA detectada."
+log_info "Dispositivos NVIDIA encontrados:"
+
+echo "$NVIDIA_DEVICES" | tee -a "$LOG_FILE"
 
 ###############################################################################
-# IDENTIFICA DRIVER RECOMENDADO
+# CONTA GPU 2BB5
+###############################################################################
+
+GPU_LINES="$(
+    echo "$NVIDIA_DEVICES" \
+        | grep -Ei \
+          '10de:2bb5|3D controller.*NVIDIA' \
+        || true
+)"
+
+GPU_COUNT="$(echo "$GPU_LINES" | sed '/^[[:space:]]*$/d' | wc -l)"
+
+log_success "GPUs NVIDIA detectadas: $GPU_COUNT"
+
+if [[ "$GPU_COUNT" -ne "$EXPECTED_GPU_COUNT" ]]; then
+
+    log_error "Quantidade inesperada de GPUs."
+
+    log_error "Esperado : $EXPECTED_GPU_COUNT"
+    log_error "Detectado: $GPU_COUNT"
+
+    log_error "GPUs encontradas:"
+    echo "$GPU_LINES" | tee -a "$LOG_FILE"
+
+    exit 1
+fi
+
+log_success "As 8 GPUs NVIDIA esperadas foram detectadas."
+
+###############################################################################
+# VALIDA DEVICE ID
+###############################################################################
+
+DEVICE_COUNT="$(
+    echo "$PCI_ALL" \
+        | grep -Eic '10de:2bb5' \
+        || true
+)"
+
+if [[ "$DEVICE_COUNT" -ne "$EXPECTED_GPU_COUNT" ]]; then
+
+    log_error "Quantidade de dispositivos 10de:2bb5 inesperada."
+    log_error "Esperado : $EXPECTED_GPU_COUNT"
+    log_error "Detectado: $DEVICE_COUNT"
+
+    exit 1
+fi
+
+log_success "Todos os 8 dispositivos são NVIDIA 10de:2bb5."
+
+###############################################################################
+# DETECTA DRIVER RECOMENDADO
 ###############################################################################
 
 separator
-log_info "Identificando driver NVIDIA recomendado pelo Ubuntu..."
+log_info "Consultando driver NVIDIA recomendado..."
 
-UBUNTU_DRIVERS_OUTPUT="$(ubuntu-drivers devices 2>&1 || true)"
+UBUNTU_DRIVER_OUTPUT="$(
+    ubuntu-drivers devices 2>&1 || true
+)"
 
-echo "$UBUNTU_DRIVERS_OUTPUT" >> "$LOG_FILE"
+echo "$UBUNTU_DRIVER_OUTPUT" >> "$LOG_FILE"
 
 NVIDIA_DRIVER_PACKAGE="$(
-    echo "$UBUNTU_DRIVERS_OUTPUT" \
-        | awk '/driver/ && /recommended/ {
-            for (i=1; i<=NF; i++) {
-                if ($i ~ /^nvidia-driver-/) {
-                    print $i
-                    exit
+    echo "$UBUNTU_DRIVER_OUTPUT" \
+        | awk '
+            /recommended/ {
+                for (i=1; i<=NF; i++) {
+                    if ($i ~ /^nvidia-driver-/) {
+                        print $i
+                        exit
+                    }
                 }
             }
-        }'
+        '
 )"
 
 if [[ -z "$NVIDIA_DRIVER_PACKAGE" ]]; then
 
-    log_error "Não foi possível identificar automaticamente"
-    log_error "o driver NVIDIA recomendado."
+    log_error "Não foi possível identificar o driver NVIDIA recomendado."
 
-    log_info "Resultado do ubuntu-drivers:"
-    echo "$UBUNTU_DRIVERS_OUTPUT" | tee -a "$LOG_FILE"
+    log_info "ubuntu-drivers devices:"
+    echo "$UBUNTU_DRIVER_OUTPUT" | tee -a "$LOG_FILE"
 
     exit 1
 fi
 
-log_success "Driver recomendado:"
+log_success "Driver NVIDIA recomendado:"
 log_success "$NVIDIA_DRIVER_PACKAGE"
 
 ###############################################################################
-# CONVERTE DRIVER PARA PACOTE DKMS
-#
-# Exemplos:
-#
-# nvidia-driver-580
-#       -> nvidia-dkms-580
-#
-# nvidia-driver-580-open
-#       -> nvidia-dkms-580-open
-#
-# nvidia-driver-580-server
-#       -> nvidia-dkms-580-server
-#
-# nvidia-driver-580-server-open
-#       -> nvidia-dkms-580-server-open
+# DERIVA PACOTE NVIDIA DKMS
 ###############################################################################
 
 NVIDIA_FLAVOR="${NVIDIA_DRIVER_PACKAGE#nvidia-driver-}"
 
 NVIDIA_DKMS_PACKAGE="nvidia-dkms-${NVIDIA_FLAVOR}"
 
-log_info "Pacote DKMS correspondente:"
+log_info "Pacote NVIDIA DKMS:"
 log_info "$NVIDIA_DKMS_PACKAGE"
 
-###############################################################################
-# VALIDA DKMS PACKAGE
-###############################################################################
+if ! apt-cache show \
+    "$NVIDIA_DKMS_PACKAGE" \
+    >/dev/null 2>&1; then
 
-if ! apt-cache show "$NVIDIA_DKMS_PACKAGE" >/dev/null 2>&1; then
-
-    log_error "Pacote DKMS correspondente não encontrado:"
+    log_error "Pacote DKMS NVIDIA não encontrado:"
     log_error "$NVIDIA_DKMS_PACKAGE"
 
     exit 1
 fi
 
 ###############################################################################
-# SIMULA INSTALAÇÃO
-#
-# Fundamental: detecta previamente se APT pretende instalar outro kernel.
+# SIMULA NVIDIA DKMS
 ###############################################################################
 
 separator
-log_info "Simulando instalação NVIDIA antes de alterar o sistema..."
+log_info "Simulando instalação do NVIDIA DKMS..."
 
-SIMULATION="$(
+NVIDIA_SIMULATION="$(
     apt-get \
         -s \
         install \
@@ -646,50 +735,46 @@ SIMULATION="$(
         2>&1
 )"
 
-echo "$SIMULATION" >> "$LOG_FILE"
+echo "$NVIDIA_SIMULATION" >> "$LOG_FILE"
 
 ###############################################################################
-# BLOQUEIA TENTATIVA DE INSTALAR OUTRO KERNEL
+# BLOQUEIA NOVO KERNEL
 ###############################################################################
 
-if echo "$SIMULATION" \
-    | grep '^Inst ' \
-    | grep -E \
-      'linux-(image|headers|modules|modules-extra)-[0-9]' \
-    | grep -v -- "$CURRENT_KERNEL" \
-    >/dev/null; then
-
-    log_error "APT tentou introduzir outro kernel durante a instalação NVIDIA."
-
-    log_error "Operação recusada para preservar:"
-    log_error "$CURRENT_KERNEL"
-
-    log_info "Pacotes que provocaram o bloqueio:"
-
-    echo "$SIMULATION" \
+UNEXPECTED_KERNELS="$(
+    echo "$NVIDIA_SIMULATION" \
         | grep '^Inst ' \
         | grep -E \
           'linux-(image|headers|modules|modules-extra)-[0-9]' \
         | grep -v -- "$CURRENT_KERNEL" \
-        | tee -a "$LOG_FILE"
+        || true
+)"
+
+if [[ -n "$UNEXPECTED_KERNELS" ]]; then
+
+    log_error "A instalação NVIDIA tentaria instalar outro kernel."
+
+    echo "$UNEXPECTED_KERNELS" | tee -a "$LOG_FILE"
+
+    log_error "Operação abortada."
 
     exit 1
 fi
 
-log_success "Simulação aprovada. Nenhum novo kernel será instalado."
+log_success "Simulação NVIDIA aprovada."
 
 ###############################################################################
-# INSTALA NVIDIA DKMS PRIMEIRO
+# INSTALA NVIDIA DKMS
 ###############################################################################
 
 separator
-log_info "Instalando módulo NVIDIA DKMS..."
+log_info "Instalando NVIDIA DKMS..."
 
 apt_install \
     "$NVIDIA_DKMS_PACKAGE"
 
 ###############################################################################
-# INSTALA USERSPACE DO DRIVER
+# INSTALA NVIDIA DRIVER
 ###############################################################################
 
 separator
@@ -699,12 +784,11 @@ apt_install \
     "$NVIDIA_DRIVER_PACKAGE"
 
 ###############################################################################
-# DKMS AUTOINSTALL SOMENTE PARA KERNEL ATUAL
+# DKMS NVIDIA
 ###############################################################################
 
 separator
-log_info "Executando DKMS para kernel:"
-log_info "$CURRENT_KERNEL"
+log_info "Executando DKMS para kernel atual..."
 
 dkms autoinstall \
     -k "$CURRENT_KERNEL"
@@ -713,167 +797,74 @@ dkms autoinstall \
 # STATUS DKMS
 ###############################################################################
 
-separator
-log_info "Status DKMS:"
+log_info "Status DKMS após NVIDIA:"
 
-DKMS_STATUS="$(dkms status || true)"
-
-echo "$DKMS_STATUS" \
+dkms status \
     | tee -a "$LOG_FILE"
 
 ###############################################################################
-# VALIDA NVIDIA DKMS
+# VALIDA NVIDIA MODULE
 ###############################################################################
 
-if ! echo "$DKMS_STATUS" \
-    | grep -i nvidia \
-    | grep -F "$CURRENT_KERNEL" \
-    | grep -Eq 'installed|built'; then
-
-    log_warn "Não foi encontrada entrada NVIDIA DKMS claramente válida"
-    log_warn "para $CURRENT_KERNEL."
-
-    log_info "Verificando módulo diretamente..."
-
-    if ! modinfo \
-        -k "$CURRENT_KERNEL" \
-        nvidia \
-        >/dev/null 2>&1; then
-
-        log_error "Módulo NVIDIA não está disponível para $CURRENT_KERNEL."
-        exit 1
-    fi
-fi
-
-log_success "Módulo NVIDIA disponível para $CURRENT_KERNEL."
-
-###############################################################################
-# BROADCOM BNXT_EN
-###############################################################################
-
-separator
-log_info "Verificando Broadcom bnxt_en..."
-
-if lspci -nn \
-    | grep -Eqi 'Broadcom.*Ethernet|Ethernet.*Broadcom'; then
-
-    log_success "Adaptador Ethernet Broadcom detectado."
-
-    lspci -nnk \
-        | grep -A4 -Bi2 Broadcom \
-        | tee -a "$LOG_FILE" \
-        || true
-
-else
-
-    log_warn "Nenhum Ethernet Broadcom detectado via lspci."
-
-fi
-
-###############################################################################
-# VERIFICA MÓDULO BNXT_EN DO KERNEL
-###############################################################################
-
-if modinfo \
+if ! modinfo \
     -k "$CURRENT_KERNEL" \
-    bnxt_en \
+    nvidia \
     >/dev/null 2>&1; then
 
-    log_success "bnxt_en disponível para $CURRENT_KERNEL."
+    log_error "Módulo NVIDIA não existe para $CURRENT_KERNEL."
 
+    exit 1
+fi
+
+NVIDIA_MODULE_FILE="$(
     modinfo \
         -k "$CURRENT_KERNEL" \
-        bnxt_en \
-        | grep -E \
-          '^(filename|version|srcversion|vermagic|description):' \
-        | tee -a "$LOG_FILE" \
-        || true
+        -F filename \
+        nvidia
+)"
 
-else
-
-    log_error "bnxt_en não foi encontrado para $CURRENT_KERNEL."
-    exit 1
-
-fi
+log_success "NVIDIA module:"
+log_success "$NVIDIA_MODULE_FILE"
 
 ###############################################################################
-# BNXT-EN-DKMS
-###############################################################################
-
-if [[ "$ENABLE_BNXT_DKMS" -eq 1 ]]; then
-
-    separator
-    log_info "Verificando pacote Broadcom bnxt-en-dkms..."
-
-    if dpkg-query \
-        -W \
-        -f='${Status}' \
-        bnxt-en-dkms \
-        2>/dev/null \
-        | grep -q "install ok installed"; then
-
-        log_success "bnxt-en-dkms já está instalado."
-
-        BNXT_VERSION="$(
-            dpkg-query \
-                -W \
-                -f='${Version}' \
-                bnxt-en-dkms
-        )"
-
-        log_info "Versão do pacote:"
-        log_info "$BNXT_VERSION"
-
-        #######################################################################
-        # Reinstala para registrar/reconstruir o DKMS caso esteja quebrado.
-        #######################################################################
-
-        log_info "Reinstalando bnxt-en-dkms..."
-
-        apt-get install \
-            "${APT_OPTIONS[@]}" \
-            --reinstall \
-            bnxt-en-dkms
-
-        log_info "Executando DKMS novamente para $CURRENT_KERNEL..."
-
-        dkms autoinstall \
-            -k "$CURRENT_KERNEL"
-
-    elif apt-cache show bnxt-en-dkms >/dev/null 2>&1; then
-
-        log_info "bnxt-en-dkms disponível no APT."
-
-        apt_install \
-            bnxt-en-dkms
-
-        dkms autoinstall \
-            -k "$CURRENT_KERNEL"
-
-    else
-
-        log_warn "bnxt-en-dkms não está instalado nem disponível"
-        log_warn "nos repositórios configurados."
-
-        log_warn "Será utilizado o bnxt_en presente no kernel atual."
-
-    fi
-
-fi
-
-###############################################################################
-# VALIDA BNXT DEPOIS DO DKMS
+# BROADCOM
 ###############################################################################
 
 separator
-log_info "Validando bnxt_en após DKMS..."
+log_info "Detectando Broadcom BCM57608..."
+
+BROADCOM_DEVICES="$(
+    lspci -Dnn \
+        | grep -Ei \
+          'Broadcom.*BCM57608|14e4:1760' \
+        || true
+)"
+
+if [[ -n "$BROADCOM_DEVICES" ]]; then
+
+    log_success "BCM57608 detectado:"
+    echo "$BROADCOM_DEVICES" | tee -a "$LOG_FILE"
+
+else
+
+    log_warn "BCM57608 não encontrado."
+
+fi
+
+###############################################################################
+# BNXT MODULE
+###############################################################################
+
+separator
+log_info "Validando bnxt_en..."
 
 if ! modinfo \
     -k "$CURRENT_KERNEL" \
     bnxt_en \
     >/dev/null 2>&1; then
 
-    log_error "bnxt_en desapareceu após processamento DKMS."
+    log_error "bnxt_en não existe para $CURRENT_KERNEL."
+
     exit 1
 fi
 
@@ -884,19 +875,89 @@ BNXT_MODULE_FILE="$(
         bnxt_en
 )"
 
-log_success "bnxt_en final:"
+log_success "bnxt_en encontrado:"
 log_success "$BNXT_MODULE_FILE"
 
 ###############################################################################
-# INSTALA CUDA TOOLKIT 13.3
+# BNXT DKMS
+###############################################################################
+
+if [[ "$ENABLE_BNXT_DKMS" -eq 1 ]]; then
+
+    separator
+    log_info "Verificando bnxt-en-dkms..."
+
+    if dpkg-query \
+        -W \
+        -f='${Status}' \
+        bnxt-en-dkms \
+        2>/dev/null \
+        | grep -q "install ok installed"; then
+
+        BNXT_VERSION="$(
+            dpkg-query \
+                -W \
+                -f='${Version}' \
+                bnxt-en-dkms
+        )"
+
+        log_success "bnxt-en-dkms instalado."
+        log_info "Versão: $BNXT_VERSION"
+
+        log_info "Reinstalando bnxt-en-dkms..."
+
+        apt_install \
+            --reinstall \
+            bnxt-en-dkms
+
+    elif apt-cache show \
+        bnxt-en-dkms \
+        >/dev/null 2>&1; then
+
+        log_info "bnxt-en-dkms disponível no APT."
+
+        apt_install \
+            bnxt-en-dkms
+
+    else
+
+        log_warn "bnxt-en-dkms não está disponível."
+
+        log_warn "Será utilizado o bnxt_en do kernel."
+
+    fi
+
+    ###########################################################################
+    # DKMS após Broadcom
+    ###########################################################################
+
+    log_info "Executando DKMS novamente..."
+
+    dkms autoinstall \
+        -k "$CURRENT_KERNEL"
+
+fi
+
+###############################################################################
+# VALIDA BNXT NOVAMENTE
+###############################################################################
+
+if ! modinfo \
+    -k "$CURRENT_KERNEL" \
+    bnxt_en \
+    >/dev/null 2>&1; then
+
+    log_error "bnxt_en não está disponível após DKMS."
+
+    exit 1
+fi
+
+###############################################################################
+# CUDA TOOLKIT
 ###############################################################################
 
 separator
 log_info "Instalando CUDA Toolkit 13.3..."
-
-###############################################################################
-# Simulação de segurança novamente.
-###############################################################################
 
 CUDA_SIMULATION="$(
     apt-get \
@@ -908,14 +969,22 @@ CUDA_SIMULATION="$(
 
 echo "$CUDA_SIMULATION" >> "$LOG_FILE"
 
-if echo "$CUDA_SIMULATION" \
-    | grep '^Inst ' \
-    | grep -E \
-      'linux-(image|headers|modules|modules-extra)-[0-9]' \
-    | grep -v -- "$CURRENT_KERNEL" \
-    >/dev/null; then
+UNEXPECTED_CUDA_KERNELS="$(
+    echo "$CUDA_SIMULATION" \
+        | grep '^Inst ' \
+        | grep -E \
+          'linux-(image|headers|modules|modules-extra)-[0-9]' \
+        | grep -v -- "$CURRENT_KERNEL" \
+        || true
+)"
 
-    log_error "CUDA Toolkit tentou instalar outro kernel."
+if [[ -n "$UNEXPECTED_CUDA_KERNELS" ]]; then
+
+    log_error "CUDA tentaria instalar outro kernel."
+
+    echo "$UNEXPECTED_CUDA_KERNELS" \
+        | tee -a "$LOG_FILE"
+
     exit 1
 fi
 
@@ -923,11 +992,11 @@ apt_install \
     "$CUDA_TOOLKIT_PACKAGE"
 
 ###############################################################################
-# CUDA ENVIRONMENT
+# CUDA PATH
 ###############################################################################
 
 separator
-log_info "Configurando PATH do CUDA 13.3..."
+log_info "Configurando CUDA 13.3..."
 
 cat > /etc/profile.d/cuda-13-3.sh <<'EOF'
 export PATH=/usr/local/cuda-13.3/bin:${PATH}
@@ -944,13 +1013,13 @@ NVCC="/usr/local/cuda-13.3/bin/nvcc"
 
 if [[ ! -x "$NVCC" ]]; then
 
-    log_error "nvcc não encontrado em:"
+    log_error "nvcc não encontrado:"
     log_error "$NVCC"
 
     exit 1
 fi
 
-log_success "CUDA Toolkit instalado."
+log_success "CUDA Toolkit 13.3 instalado."
 
 "$NVCC" \
     --version \
@@ -961,18 +1030,24 @@ log_success "CUDA Toolkit instalado."
 ###############################################################################
 
 separator
-log_info "Verificando pacote DCGM..."
+log_info "Verificando DCGM..."
 
-if ! apt-cache show "$DCGM_PACKAGE" >/dev/null 2>&1; then
+if ! apt-cache show \
+    "$DCGM_PACKAGE" \
+    >/dev/null 2>&1; then
 
-    log_error "Pacote não disponível:"
+    log_error "DCGM não disponível:"
     log_error "$DCGM_PACKAGE"
 
     exit 1
 fi
 
-log_info "Instalando:"
-log_info "$DCGM_PACKAGE"
+log_success "DCGM disponível:"
+log_success "$DCGM_PACKAGE"
+
+###############################################################################
+# DCGM INSTALL
+###############################################################################
 
 apt_install \
     --install-recommends \
@@ -989,100 +1064,73 @@ if systemctl list-unit-files \
     | grep -q '^nvidia-dcgm\.service'; then
 
     systemctl enable nvidia-dcgm.service || true
-    systemctl restart nvidia-dcgm.service || true
 
 elif systemctl list-unit-files \
     | grep -q '^dcgm\.service'; then
 
     systemctl enable dcgm.service || true
-    systemctl restart dcgm.service || true
 
 else
 
-    log_warn "Serviço systemd DCGM não identificado."
+    log_warn "Serviço DCGM não encontrado."
+
 fi
 
 ###############################################################################
-# DEPMOD E INITRAMFS
+# DEPMOD
 ###############################################################################
 
 separator
-log_info "Atualizando mapa de módulos..."
+log_info "Executando depmod..."
 
 depmod \
     -a "$CURRENT_KERNEL"
 
-log_info "Atualizando initramfs SOMENTE do kernel atual..."
+###############################################################################
+# INITRAMFS
+###############################################################################
+
+log_info "Atualizando initramfs somente do kernel atual..."
 
 update-initramfs \
     -u \
     -k "$CURRENT_KERNEL"
 
 ###############################################################################
-# GARANTE QUE O KERNEL NÃO MUDOU
+# VALIDAR KERNEL
 ###############################################################################
 
-if [[ "$(uname -r)" != "$ORIGINAL_KERNEL" ]]; then
+separator
 
-    log_error "Kernel em execução mudou inesperadamente."
+if [[ "$(uname -r)" != "$CURRENT_KERNEL" ]]; then
+
+    log_error "O kernel mudou durante a instalação."
+
+    log_error "Inicial : $CURRENT_KERNEL"
+    log_error "Atual   : $(uname -r)"
+
     exit 1
 fi
 
-###############################################################################
-# VERIFICA KERNELS INSTALADOS
-###############################################################################
-
-separator
-log_info "Kernel em execução:"
-uname -r | tee -a "$LOG_FILE"
-
-log_info "Imagens de kernel instaladas:"
-
-dpkg-query \
-    -W \
-    'linux-image-[0-9]*' \
-    2>/dev/null \
-    | tee -a "$LOG_FILE" \
-    || true
+log_success "Kernel permaneceu:"
+log_success "$CURRENT_KERNEL"
 
 ###############################################################################
-# VERIFICA HOLDS
+# NVIDIA MODULE LOAD
 ###############################################################################
 
 separator
-log_info "Pacotes em HOLD:"
-
-apt-mark showhold \
-    | tee -a "$LOG_FILE"
-
-###############################################################################
-# VALIDA DRIVER NVIDIA
-#
-# Antes do reboot pode existir um driver antigo carregado.
-# Portanto modinfo é obrigatório; nvidia-smi é best effort.
-###############################################################################
-
-separator
-log_info "Validando módulo NVIDIA para $CURRENT_KERNEL..."
-
-modinfo \
-    -k "$CURRENT_KERNEL" \
-    nvidia \
-    | grep -E \
-      '^(filename|version|vermagic):' \
-    | tee -a "$LOG_FILE"
-
-###############################################################################
-# TENTA CARREGAR DRIVER
-###############################################################################
-
 log_info "Tentando carregar módulo NVIDIA..."
 
 if modprobe nvidia 2>>"$LOG_FILE"; then
-    log_success "Módulo NVIDIA carregado."
+
+    log_success "Módulo nvidia carregado."
+
 else
-    log_warn "Não foi possível carregar NVIDIA antes do reboot."
-    log_warn "Isso pode ser normal se uma versão anterior estiver em uso."
+
+    log_warn "Não foi possível carregar nvidia neste momento."
+    log_warn "Será validado novamente após reboot."
+
 fi
 
 ###############################################################################
@@ -1090,38 +1138,75 @@ fi
 ###############################################################################
 
 separator
+log_info "Executando nvidia-smi..."
 
 if command -v nvidia-smi >/dev/null 2>&1; then
 
-    log_info "Executando nvidia-smi..."
+    if nvidia-smi \
+        | tee -a "$LOG_FILE"; then
 
-    if nvidia-smi | tee -a "$LOG_FILE"; then
-
-        log_success "nvidia-smi funcionando."
+        log_success "nvidia-smi respondeu corretamente."
 
     else
 
-        log_warn "nvidia-smi ainda não está funcional."
-        log_warn "Nova tentativa deverá ser feita após o reboot."
+        log_warn "nvidia-smi não conseguiu acessar as GPUs."
+        log_warn "Isso poderá ser resolvido após o reboot."
 
     fi
 
 else
 
     log_error "nvidia-smi não foi instalado."
+
     exit 1
 
 fi
 
 ###############################################################################
-# DCGM VERSION
+# NVIDIA-SMI -L
 ###############################################################################
 
 separator
+log_info "Enumerando GPUs NVIDIA..."
+
+NVIDIA_SMI_LIST="$(
+    nvidia-smi -L 2>&1 || true
+)"
+
+echo "$NVIDIA_SMI_LIST" \
+    | tee -a "$LOG_FILE"
+
+NVIDIA_SMI_COUNT="$(
+    echo "$NVIDIA_SMI_LIST" \
+        | grep -c '^GPU ' \
+        || true
+)"
+
+if [[ "$NVIDIA_SMI_COUNT" -eq "$EXPECTED_GPU_COUNT" ]]; then
+
+    log_success "nvidia-smi detectou as 8 GPUs."
+
+elif [[ "$NVIDIA_SMI_COUNT" -eq 0 ]]; then
+
+    log_warn "nvidia-smi ainda não detectou GPUs."
+    log_warn "Isso será revalidado após reboot."
+
+else
+
+    log_warn "nvidia-smi detectou $NVIDIA_SMI_COUNT GPUs."
+    log_warn "Esperado: $EXPECTED_GPU_COUNT"
+
+fi
+
+###############################################################################
+# DCGM
+###############################################################################
+
+separator
+log_info "Validando DCGM..."
 
 if command -v dcgmi >/dev/null 2>&1; then
 
-    log_info "DCGM:"
     dcgmi --version \
         | tee -a "$LOG_FILE" \
         || true
@@ -1129,6 +1214,7 @@ if command -v dcgmi >/dev/null 2>&1; then
 else
 
     log_warn "dcgmi não encontrado no PATH."
+
 fi
 
 ###############################################################################
@@ -1136,7 +1222,7 @@ fi
 ###############################################################################
 
 separator
-log_info "Ferramentas adicionais..."
+log_info "Configurando Snap..."
 
 if command -v snap >/dev/null 2>&1; then
 
@@ -1146,63 +1232,51 @@ if command -v snap >/dev/null 2>&1; then
 
     if [[ "$INSTALL_NVTOP" -eq 1 ]]; then
 
-        log_info "Instalando nvtop via Snap..."
+        log_info "Instalando nvtop..."
 
         if snap install nvtop; then
             log_success "nvtop instalado."
         else
             log_warn "Falha ao instalar nvtop."
         fi
+
     fi
 
     if [[ "$INSTALL_GPU_BURN" -eq 1 ]]; then
 
-        log_info "Instalando gpu-burn via Snap..."
+        log_info "Instalando gpu-burn..."
 
         if snap install gpu-burn; then
             log_success "gpu-burn instalado."
         else
             log_warn "Falha ao instalar gpu-burn."
         fi
+
     fi
 
 else
 
     log_warn "Snap não está disponível."
+
 fi
 
 ###############################################################################
-# NÃO EXECUTAR AUTOREMOVE
+# STATUS FINAL DKMS
 ###############################################################################
 
 separator
-log_warn "apt autoremove NÃO será executado."
-
-log_info "Isso é proposital para evitar remoção acidental de:"
-log_info "- kernel"
-log_info "- headers"
-log_info "- módulos"
-log_info "- DKMS"
-log_info "- NVIDIA"
-log_info "- Broadcom"
-
-###############################################################################
-# RELATÓRIO FINAL DKMS
-###############################################################################
-
-separator
-log_info "Status final do DKMS:"
+log_info "STATUS FINAL DKMS"
 
 dkms status \
     | tee -a "$LOG_FILE" \
     || true
 
 ###############################################################################
-# RELATÓRIO BNXT
+# STATUS BNXT
 ###############################################################################
 
 separator
-log_info "Broadcom bnxt_en:"
+log_info "STATUS FINAL BNXT"
 
 modinfo \
     -k "$CURRENT_KERNEL" \
@@ -1213,71 +1287,122 @@ modinfo \
     || true
 
 ###############################################################################
-# INTERFACE BROADCOM
+# STATUS NVIDIA MODULE
 ###############################################################################
 
-log_info "Drivers Broadcom em uso:"
+separator
+log_info "STATUS FINAL NVIDIA MODULE"
 
-lspci -nnk \
-    | awk '
-        /Broadcom/ {
-            print
-            count=5
-            next
-        }
+modinfo \
+    -k "$CURRENT_KERNEL" \
+    nvidia \
+    | grep -E \
+      '^(filename|version|srcversion|vermagic|description):' \
+    | tee -a "$LOG_FILE"
 
-        count > 0 {
-            print
-            count--
-        }
-    ' \
+###############################################################################
+# PCI NVIDIA
+###############################################################################
+
+separator
+log_info "GPUs NVIDIA PCI"
+
+lspci -Dnn \
+    | grep -Ei \
+      '10de:2bb5|NVIDIA.*3D controller|NVIDIA.*VGA' \
+    | tee -a "$LOG_FILE"
+
+###############################################################################
+# PCI BROADCOM
+###############################################################################
+
+separator
+log_info "Broadcom BCM57608 PCI"
+
+lspci -Dnnk \
+    | grep -A5 -B1 \
+      -Ei 'BCM57608|14e4:1760' \
     | tee -a "$LOG_FILE" \
     || true
 
 ###############################################################################
-# CUDA
+# HOLDS
 ###############################################################################
 
 separator
-log_info "CUDA:"
+log_info "APT HOLDS"
 
-"$NVCC" \
-    --version \
+apt-mark showhold \
     | tee -a "$LOG_FILE"
 
 ###############################################################################
-# VERIFICAÇÕES CRÍTICAS FINAIS
+# KERNELS
 ###############################################################################
 
 separator
-log_info "Executando verificações críticas finais..."
+log_info "KERNELS INSTALADOS"
+
+dpkg-query \
+    -W \
+    -f='${Package}\t${Version}\t${Status}\n' \
+    'linux-image*' \
+    'linux-headers*' \
+    'linux-modules*' \
+    2>/dev/null \
+    | tee -a "$LOG_FILE" \
+    || true
+
+###############################################################################
+# NÃO EXECUTAR AUTOREMOVE
+###############################################################################
+
+separator
+
+log_warn "apt autoremove NÃO será executado."
+
+log_info "Isso é proposital."
+
+###############################################################################
+# VALIDAÇÕES CRÍTICAS
+###############################################################################
+
+separator
+log_info "VALIDAÇÕES CRÍTICAS FINAIS"
 
 FINAL_ERRORS=0
 
 ###############################################################################
-# 1. Kernel
+# KERNEL
 ###############################################################################
 
 if [[ "$(uname -r)" == "$CURRENT_KERNEL" ]]; then
-    log_success "Kernel preservado: $CURRENT_KERNEL"
+
+    log_success "[OK] Kernel: $CURRENT_KERNEL"
+
 else
-    log_error "Kernel inesperado."
+
+    log_error "[FAIL] Kernel mudou."
     FINAL_ERRORS=$((FINAL_ERRORS + 1))
+
 fi
 
 ###############################################################################
-# 2. Headers
+# HEADERS
 ###############################################################################
 
-if [[ -e "/lib/modules/$CURRENT_KERNEL/build/Makefile" ]]; then
-    log_success "Headers OK."
+if [[ -f "$KERNEL_BUILD/Makefile" ]]; then
+
+    log_success "[OK] Kernel headers."
+
 else
-    log_error "Headers inválidos."
+
+    log_error "[FAIL] Kernel headers."
     FINAL_ERRORS=$((FINAL_ERRORS + 1))
+
 fi
 
 ###############################################################################
-# 3. NVIDIA
+# NVIDIA MODULE
 ###############################################################################
 
 if modinfo \
@@ -1285,14 +1410,17 @@ if modinfo \
     nvidia \
     >/dev/null 2>&1; then
 
-    log_success "NVIDIA module OK."
+    log_success "[OK] NVIDIA DKMS module."
+
 else
-    log_error "NVIDIA module ausente."
+
+    log_error "[FAIL] NVIDIA DKMS module."
     FINAL_ERRORS=$((FINAL_ERRORS + 1))
+
 fi
 
 ###############################################################################
-# 4. BNXT
+# BNXT
 ###############################################################################
 
 if modinfo \
@@ -1300,25 +1428,32 @@ if modinfo \
     bnxt_en \
     >/dev/null 2>&1; then
 
-    log_success "bnxt_en module OK."
+    log_success "[OK] bnxt_en."
+
 else
-    log_error "bnxt_en module ausente."
+
+    log_error "[FAIL] bnxt_en."
     FINAL_ERRORS=$((FINAL_ERRORS + 1))
+
 fi
 
 ###############################################################################
-# 5. CUDA
+# CUDA
 ###############################################################################
 
 if [[ -x "$NVCC" ]]; then
-    log_success "CUDA 13.3 OK."
+
+    log_success "[OK] CUDA Toolkit 13.3."
+
 else
-    log_error "CUDA 13.3 inválido."
+
+    log_error "[FAIL] CUDA Toolkit 13.3."
     FINAL_ERRORS=$((FINAL_ERRORS + 1))
+
 fi
 
 ###############################################################################
-# 6. DCGM
+# DCGM
 ###############################################################################
 
 if dpkg-query \
@@ -1328,10 +1463,28 @@ if dpkg-query \
     2>/dev/null \
     | grep -q "install ok installed"; then
 
-    log_success "DCGM instalado."
+    log_success "[OK] DCGM."
+
 else
-    log_error "DCGM não está instalado corretamente."
+
+    log_error "[FAIL] DCGM."
     FINAL_ERRORS=$((FINAL_ERRORS + 1))
+
+fi
+
+###############################################################################
+# NVIDIA PCI COUNT
+###############################################################################
+
+if [[ "$GPU_COUNT" -eq "$EXPECTED_GPU_COUNT" ]]; then
+
+    log_success "[OK] PCI GPUs: $GPU_COUNT"
+
+else
+
+    log_error "[FAIL] PCI GPUs: $GPU_COUNT"
+    FINAL_ERRORS=$((FINAL_ERRORS + 1))
+
 fi
 
 ###############################################################################
@@ -1340,40 +1493,37 @@ fi
 
 separator
 
-if [[ "$FINAL_ERRORS" -gt 0 ]]; then
+if [[ "$FINAL_ERRORS" -ne 0 ]]; then
 
-    log_error "Foram encontrados $FINAL_ERRORS erro(s) crítico(s)."
-    log_error "O servidor NÃO será reiniciado automaticamente."
-    log_error "Verifique:"
-    log_error "$LOG_FILE"
+    log_error "=============================================="
+    log_error " INSTALAÇÃO NÃO APROVADA"
+    log_error "=============================================="
+
+    log_error "Erros críticos: $FINAL_ERRORS"
+    log_error "Kernel: $CURRENT_KERNEL"
+    log_error "Log: $LOG_FILE"
+
+    log_error "O servidor NÃO será reiniciado."
 
     exit 1
 fi
 
-log_success "TODAS AS VERIFICAÇÕES CRÍTICAS FORAM APROVADAS."
+###############################################################################
+# SUCESSO
+###############################################################################
 
-separator
+log_success "=============================================="
+log_success " INSTALAÇÃO APROVADA"
+log_success "=============================================="
 
-log_success "Kernel preservado:"
-log_success "$CURRENT_KERNEL"
-
-log_success "Driver NVIDIA:"
-log_success "$NVIDIA_DRIVER_PACKAGE"
-
-log_success "NVIDIA DKMS:"
-log_success "$NVIDIA_DKMS_PACKAGE"
-
-log_success "CUDA:"
-log_success "13.3"
-
-log_success "DCGM:"
-log_success "$DCGM_PACKAGE"
-
-log_success "Broadcom:"
-log_success "bnxt_en disponível"
-
-log_success "Log:"
-log_success "$LOG_FILE"
+log_success "Ubuntu       : 24.04"
+log_success "Kernel       : $CURRENT_KERNEL"
+log_success "NVIDIA GPUs  : $GPU_COUNT"
+log_success "CUDA         : 13.3"
+log_success "DCGM         : 4 / CUDA 13"
+log_success "bnxt_en      : OK"
+log_success "NVIDIA DKMS  : OK"
+log_success "Log          : $LOG_FILE"
 
 separator
 
@@ -1394,6 +1544,8 @@ if [[ "$AUTO_REBOOT" -eq 1 ]]; then
 
 else
 
-    log_warn "Reboot automático desabilitado."
-    log_warn "Reinicie o servidor manualmente antes de validar a GPU."
+    log_warn "AUTO_REBOOT=0."
+    log_warn "Nenhum reboot será executado."
+
 fi
+```

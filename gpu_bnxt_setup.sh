@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 
 ###############################################################################
@@ -13,12 +12,12 @@
 # - Não atualizar/trocar o kernel ativo
 # - Instalar exatamente os headers do kernel ativo
 # - Instalar NVIDIA usando DKMS
-# - Detectar GPUs NVIDIA por PCI Vendor ID 10de
+# - Detectar GPUs NVIDIA por PCI Vendor ID 10de (suporte a múltiplos PCI Domains)
 # - Validar todas as GPUs NVIDIA
 # - Instalar CUDA Toolkit 13.3
 # - Instalar DCGM 4 para CUDA 13
 # - Preservar/validar Broadcom bnxt_en
-# - Suportar bnxt-en-dkms
+# - Suportar bnxt-en-dkms (desabilitado por padrão para kernels 7.0+)
 # - Não executar apt autoremove
 # - Abortar antes do reboot se houver erro crítico
 #
@@ -50,7 +49,9 @@ EXPECTED_NVIDIA_DEVICE="2bb5"
 EXPECTED_GPU_COUNT=8
 
 # Broadcom:
-ENABLE_BNXT_DKMS=1
+# 0 = Usa o driver bnxt_en nativo do kernel (recomendado para Kernel 7.0+)
+# 1 = Tenta instalar bnxt-en-dkms (pode falhar em kernels recentes)
+ENABLE_BNXT_DKMS=0
 
 # Ferramentas opcionais:
 INSTALL_NVTOP=1
@@ -356,6 +357,21 @@ else
 fi
 
 ###############################################################################
+# BLACKLIST NOUVEAU
+###############################################################################
+
+separator
+log_info "Configurando blacklist para o driver open-source nouveau..."
+
+cat > /etc/modprobe.d/blacklist-nouveau.conf <<'EOF'
+blacklist nouveau
+options nouveau modeset=0
+EOF
+
+chmod 644 /etc/modprobe.d/blacklist-nouveau.conf
+log_success "Blacklist para nouveau configurado."
+
+###############################################################################
 # APT UPDATE
 ###############################################################################
 
@@ -444,10 +460,10 @@ for pkg in \
 
     if dpkg-query \
         -W \
-        -f='${db:Status-Abbrev}' \
+        -f='${Status}\n' \
         "$pkg" \
         2>/dev/null \
-        | grep -q '^ii'; then
+        | grep -q 'install ok installed'; then
 
         apt-mark hold "$pkg" >/dev/null
 
@@ -479,10 +495,10 @@ for pkg in "${CURRENT_KERNEL_PACKAGES[@]}"; do
 
     if dpkg-query \
         -W \
-        -f='${db:Status-Abbrev}' \
+        -f='${Status}\n' \
         "$pkg" \
         2>/dev/null \
-        | grep -q '^ii'; then
+        | grep -q 'install ok installed'; then
 
         apt-mark hold "$pkg" >/dev/null
 
@@ -585,7 +601,7 @@ echo "$PCI_ALL" >> "$LOG_FILE"
 
 NVIDIA_DEVICES="$(
     echo "$PCI_ALL" \
-        | grep -Ei '(^|[[:space:]])[0-9a-f]{4}:10de:' \
+        | grep -Ei '10de:' \
         || true
 )"
 
@@ -687,15 +703,12 @@ NVIDIA_DRIVER_PACKAGE="$(
 
 if [[ -z "$NVIDIA_DRIVER_PACKAGE" ]]; then
 
-    log_error "Não foi possível identificar o driver NVIDIA recomendado."
+    log_warn "Não foi possível identificar o driver via ubuntu-drivers. Aplicando fallback para nvidia-driver-550..."
+    NVIDIA_DRIVER_PACKAGE="nvidia-driver-550"
 
-    log_info "ubuntu-drivers devices:"
-    echo "$UBUNTU_DRIVER_OUTPUT" | tee -a "$LOG_FILE"
-
-    exit 1
 fi
 
-log_success "Driver NVIDIA recomendado:"
+log_success "Driver NVIDIA selecionado:"
 log_success "$NVIDIA_DRIVER_PACKAGE"
 
 ###############################################################################
@@ -720,11 +733,11 @@ if ! apt-cache show \
 fi
 
 ###############################################################################
-# SIMULA NVIDIA DKMS
+# SIMULA NVIDIA DKMS E DRIVER
 ###############################################################################
 
 separator
-log_info "Simulando instalação do NVIDIA DKMS..."
+log_info "Simulando instalação do NVIDIA DKMS e Driver..."
 
 NVIDIA_SIMULATION="$(
     apt-get \
@@ -764,23 +777,14 @@ fi
 log_success "Simulação NVIDIA aprovada."
 
 ###############################################################################
-# INSTALA NVIDIA DKMS
+# INSTALA NVIDIA DRIVER + DKMS (UNIFICADO)
 ###############################################################################
 
 separator
-log_info "Instalando NVIDIA DKMS..."
+log_info "Instalando NVIDIA DKMS e Driver em comando unificado..."
 
 apt_install \
-    "$NVIDIA_DKMS_PACKAGE"
-
-###############################################################################
-# INSTALA NVIDIA DRIVER
-###############################################################################
-
-separator
-log_info "Instalando driver NVIDIA..."
-
-apt_install \
+    "$NVIDIA_DKMS_PACKAGE" \
     "$NVIDIA_DRIVER_PACKAGE"
 
 ###############################################################################
@@ -791,7 +795,8 @@ separator
 log_info "Executando DKMS para kernel atual..."
 
 dkms autoinstall \
-    -k "$CURRENT_KERNEL"
+    -k "$CURRENT_KERNEL" \
+    || log_warn "DKMS autoinstall retornou erro (ignorado). Validando a seguir."
 
 ###############################################################################
 # STATUS DKMS
@@ -889,7 +894,7 @@ if [[ "$ENABLE_BNXT_DKMS" -eq 1 ]]; then
 
     if dpkg-query \
         -W \
-        -f='${Status}' \
+        -f='${Status}\n' \
         bnxt-en-dkms \
         2>/dev/null \
         | grep -q "install ok installed"; then
@@ -934,7 +939,20 @@ if [[ "$ENABLE_BNXT_DKMS" -eq 1 ]]; then
     log_info "Executando DKMS novamente..."
 
     dkms autoinstall \
-        -k "$CURRENT_KERNEL"
+        -k "$CURRENT_KERNEL" \
+        || log_warn "DKMS autoinstall retornou erro (ignorado). Validando a seguir."
+
+else
+
+    separator
+    log_info "Instalação do bnxt-en-dkms está DESABILITADA (ENABLE_BNXT_DKMS=0)."
+    log_info "Utilizando driver nativo do kernel (in-tree)."
+
+    if dpkg-query -W -f='${Status}\n' bnxt-en-dkms 2>/dev/null | grep -q "install ok installed"; then
+        log_warn "O pacote bnxt-en-dkms está presente e incompatível com o kernel 7.0+."
+        log_info "Removendo bnxt-en-dkms para limpar a árvore do DKMS..."
+        apt-get remove --purge -y bnxt-en-dkms || true
+    fi
 
 fi
 
@@ -947,9 +965,16 @@ if ! modinfo \
     bnxt_en \
     >/dev/null 2>&1; then
 
-    log_error "bnxt_en não está disponível após DKMS."
+    log_error "bnxt_en não está disponível."
 
     exit 1
+fi
+
+BNXT_FINAL_FILE="$(modinfo -k "$CURRENT_KERNEL" -F filename bnxt_en)"
+if [[ "$BNXT_FINAL_FILE" == *"/updates/dkms/"* ]]; then
+    log_success "bnxt_en do DKMS está em uso: $BNXT_FINAL_FILE"
+else
+    log_info "bnxt_en in-tree está em uso: $BNXT_FINAL_FILE"
 fi
 
 ###############################################################################
@@ -1458,7 +1483,7 @@ fi
 
 if dpkg-query \
     -W \
-    -f='${Status}' \
+    -f='${Status}\n' \
     "$DCGM_PACKAGE" \
     2>/dev/null \
     | grep -q "install ok installed"; then
@@ -1548,4 +1573,3 @@ else
     log_warn "Nenhum reboot será executado."
 
 fi
-```

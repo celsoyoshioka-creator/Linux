@@ -12,8 +12,8 @@
 # - Não atualizar/trocar o kernel ativo
 # - Instalar exatamente os headers do kernel ativo
 # - Instalar NVIDIA usando DKMS
-# - Detectar GPUs NVIDIA por PCI Vendor ID 10de (suporte a múltiplos PCI Domains)
-# - Validar todas as GPUs NVIDIA
+# - Detectar automaticamente QUALQUER NÚMERO DE GPUs NVIDIA
+# - Validar todas as GPUs NVIDIA via PCI x nvidia-smi
 # - Instalar CUDA Toolkit 13.3
 # - Instalar DCGM 4 para CUDA 13
 # - Preservar/validar Broadcom bnxt_en
@@ -42,11 +42,6 @@ CUDA_KEYRING_PACKAGE="cuda-keyring_${CUDA_KEYRING_VERSION}_all.deb"
 
 CUDA_REPO_BASE="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64"
 CUDA_KEYRING_URL="${CUDA_REPO_BASE}/${CUDA_KEYRING_PACKAGE}"
-
-# Seu hardware NVIDIA atual:
-EXPECTED_NVIDIA_VENDOR="10de"
-EXPECTED_NVIDIA_DEVICE="2bb5"
-EXPECTED_GPU_COUNT=8
 
 # Broadcom:
 # 0 = Usa o driver bnxt_en nativo do kernel (recomendado para Kernel 7.0+)
@@ -587,7 +582,7 @@ fi
 log_success "$CUDA_TOOLKIT_PACKAGE disponível."
 
 ###############################################################################
-# DETECTA NVIDIA POR PCI ID
+# DETECTA NVIDIA POR PCI ID E CONTA AS GPUs
 ###############################################################################
 
 separator
@@ -606,73 +601,38 @@ NVIDIA_DEVICES="$(
 )"
 
 if [[ -z "$NVIDIA_DEVICES" ]]; then
-
     log_error "Nenhum dispositivo PCI com vendor NVIDIA (10de) encontrado."
-
     log_info "Saída completa do lspci:"
     echo "$PCI_ALL" | tee -a "$LOG_FILE"
-
     exit 1
 fi
 
 ###############################################################################
-# MOSTRA GPUs NVIDIA
-###############################################################################
-
-log_info "Dispositivos NVIDIA encontrados:"
-
-echo "$NVIDIA_DEVICES" | tee -a "$LOG_FILE"
-
-###############################################################################
-# CONTA GPU 2BB5
+# CONTA GPUs NVIDIA DINAMICAMENTE
 ###############################################################################
 
 GPU_LINES="$(
     echo "$NVIDIA_DEVICES" \
-        | grep -Ei \
-          '10de:2bb5|3D controller.*NVIDIA' \
+        | grep -Ei 'VGA compatible controller|3D controller' \
         || true
 )"
 
 GPU_COUNT="$(echo "$GPU_LINES" | sed '/^[[:space:]]*$/d' | wc -l)"
 
-log_success "GPUs NVIDIA detectadas: $GPU_COUNT"
-
-if [[ "$GPU_COUNT" -ne "$EXPECTED_GPU_COUNT" ]]; then
-
-    log_error "Quantidade inesperada de GPUs."
-
-    log_error "Esperado : $EXPECTED_GPU_COUNT"
-    log_error "Detectado: $GPU_COUNT"
-
-    log_error "GPUs encontradas:"
-    echo "$GPU_LINES" | tee -a "$LOG_FILE"
-
+if [[ "$GPU_COUNT" -eq 0 ]]; then
+    log_error "Nenhum controlador de vídeo/3D NVIDIA encontrado."
     exit 1
 fi
 
-log_success "As 8 GPUs NVIDIA esperadas foram detectadas."
+EXPECTED_GPU_COUNT="$GPU_COUNT"
+log_success "GPUs NVIDIA detectadas via barramento PCI: $EXPECTED_GPU_COUNT"
 
 ###############################################################################
-# VALIDA DEVICE ID
+# MOSTRA MODELOS DE GPU
 ###############################################################################
 
-DEVICE_COUNT="$(
-    echo "$PCI_ALL" \
-        | grep -Eic '10de:2bb5' \
-        || true
-)"
-
-if [[ "$DEVICE_COUNT" -ne "$EXPECTED_GPU_COUNT" ]]; then
-
-    log_error "Quantidade de dispositivos 10de:2bb5 inesperada."
-    log_error "Esperado : $EXPECTED_GPU_COUNT"
-    log_error "Detectado: $DEVICE_COUNT"
-
-    exit 1
-fi
-
-log_success "Todos os 8 dispositivos são NVIDIA 10de:2bb5."
+log_info "Dispositivos de vídeo NVIDIA identificados:"
+echo "$GPU_LINES" | tee -a "$LOG_FILE"
 
 ###############################################################################
 # DETECTA DRIVER RECOMENDADO
@@ -1165,6 +1125,8 @@ fi
 separator
 log_info "Executando nvidia-smi..."
 
+NVIDIA_SMI_COUNT=0
+
 if command -v nvidia-smi >/dev/null 2>&1; then
 
     if nvidia-smi \
@@ -1192,7 +1154,7 @@ fi
 ###############################################################################
 
 separator
-log_info "Enumerando GPUs NVIDIA..."
+log_info "Enumerando GPUs NVIDIA via driver..."
 
 NVIDIA_SMI_LIST="$(
     nvidia-smi -L 2>&1 || true
@@ -1209,7 +1171,7 @@ NVIDIA_SMI_COUNT="$(
 
 if [[ "$NVIDIA_SMI_COUNT" -eq "$EXPECTED_GPU_COUNT" ]]; then
 
-    log_success "nvidia-smi detectou as 8 GPUs."
+    log_success "nvidia-smi detectou todas as $EXPECTED_GPU_COUNT GPUs."
 
 elif [[ "$NVIDIA_SMI_COUNT" -eq 0 ]]; then
 
@@ -1334,7 +1296,7 @@ log_info "GPUs NVIDIA PCI"
 
 lspci -Dnn \
     | grep -Ei \
-      '10de:2bb5|NVIDIA.*3D controller|NVIDIA.*VGA' \
+      '10de:.*|NVIDIA.*3D controller|NVIDIA.*VGA' \
     | tee -a "$LOG_FILE"
 
 ###############################################################################
@@ -1498,18 +1460,20 @@ else
 fi
 
 ###############################################################################
-# NVIDIA PCI COUNT
+# NVIDIA GPU COUNT (PCI vs SMI)
 ###############################################################################
 
-if [[ "$GPU_COUNT" -eq "$EXPECTED_GPU_COUNT" ]]; then
-
-    log_success "[OK] PCI GPUs: $GPU_COUNT"
-
+# Só comparamos se o nvidia-smi já tiver respondido, do contrário deixamos passar
+# pois o módulo NVIDIA pode só estar disponível após o boot.
+if [[ "$NVIDIA_SMI_COUNT" -gt 0 ]]; then
+    if [[ "$NVIDIA_SMI_COUNT" -eq "$EXPECTED_GPU_COUNT" ]]; then
+        log_success "[OK] GPUs detectadas no SO e no Driver: $EXPECTED_GPU_COUNT"
+    else
+        log_error "[FAIL] GPUs no SO (PCI): $EXPECTED_GPU_COUNT | GPUs no nvidia-smi: $NVIDIA_SMI_COUNT"
+        FINAL_ERRORS=$((FINAL_ERRORS + 1))
+    fi
 else
-
-    log_error "[FAIL] PCI GPUs: $GPU_COUNT"
-    FINAL_ERRORS=$((FINAL_ERRORS + 1))
-
+    log_warn "[AVISO] Módulo/Driver nvidia pendente de reboot para listar GPUs."
 fi
 
 ###############################################################################
@@ -1543,7 +1507,7 @@ log_success "=============================================="
 
 log_success "Ubuntu       : 24.04"
 log_success "Kernel       : $CURRENT_KERNEL"
-log_success "NVIDIA GPUs  : $GPU_COUNT"
+log_success "NVIDIA GPUs  : $EXPECTED_GPU_COUNT (Detectado)"
 log_success "CUDA         : 13.3"
 log_success "DCGM         : 4 / CUDA 13"
 log_success "bnxt_en      : OK"

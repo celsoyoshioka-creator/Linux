@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Garante que os caminhos de binários de sistema (como ip e dmidecode) estejam acessíveis
+export PATH=$PATH:/sbin:/usr/sbin:/usr/local/sbin:/bin:/usr/bin
+
 # Define a linha divisória da tabela ASCII
 SEP="+----------------------+---------------------------------------------------------+"
 
@@ -12,10 +15,13 @@ print_row() {
 
 # --- COLETA DE DADOS DE HARDWARE ---
 
-# 1. Hostname e SO
+# 1. Hostname e SO (Lê o os-release, padrão no Debian e RHEL)
 HOST=$(hostname)
-OS=$(grep "^PRETTY_NAME=" /etc/os-release 2>/dev/null | cut -d'"' -f2)
-[ -z "$OS" ] && OS=$(uname -srm)
+if [ -f /etc/os-release ]; then
+    OS=$(grep "^PRETTY_NAME=" /etc/os-release | cut -d'"' -f2)
+else
+    OS=$(uname -srm)
+fi
 
 # 2. Processador
 CPU_MODEL=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | xargs)
@@ -23,6 +29,7 @@ CPU_CORES=$(nproc 2>/dev/null || echo "?")
 CPU_INFO="${CPU_CORES}x ${CPU_MODEL}"
 
 # 3. Memória RAM (Capacidade Lógica)
+# O awk busca por 'Mem:' para sistemas em inglês ou 'Memória:' para pt_BR
 RAM_INFO=$(free -h 2>/dev/null | awk '/^Mem:/ || /^Memória:/ {print "Total: "$2" | Usada: "$3" | Disp: "$7}')
 [ -z "$RAM_INFO" ] && RAM_INFO="Não foi possível ler a RAM"
 
@@ -37,18 +44,26 @@ elif command -v dmidecode &> /dev/null; then
         OCCUPIED_SLOTS=$((TOTAL_SLOTS - FREE_SLOTS))
         DIMM_INFO="Total: $TOTAL_SLOTS slot(s) | Ocupados: $OCCUPIED_SLOTS | Livres: $FREE_SLOTS"
     else
-        DIMM_INFO="Informação não suportada ou VM (Virtual Machine)"
+        DIMM_INFO="Info não suportada pelo hardware ou é Máquina Virtual"
     fi
 else
-    DIMM_INFO="Pacote 'dmidecode' não instalado"
+    # Detecta qual o gerenciador de pacotes para sugerir a instalação correta
+    if command -v apt-get &> /dev/null; then
+        DIMM_INFO="Ausente. Instale com: sudo apt install dmidecode"
+    elif command -v dnf &> /dev/null || command -v yum &> /dev/null; then
+        DIMM_INFO="Ausente. Instale com: sudo yum install dmidecode"
+    else
+        DIMM_INFO="Pacote 'dmidecode' não instalado"
+    fi
 fi
 
-# 5. Discos físicos (Ignora loopbacks e cd-roms)
-DISKS=$(lsblk -nd -o NAME,SIZE -e 7,11 2>/dev/null | awk '{print $1" ("$2")"}' | paste -sd ", " -)
+# 5. Discos físicos (Ignora loopbacks do snapd, cd-roms, zram, etc)
+DISKS=$(lsblk -nd -o NAME,SIZE -e 7,11,252 2>/dev/null | awk '{print $1" ("$2")"}' | paste -sd ", " -)
 [ -z "$DISKS" ] && DISKS="Nenhum disco físico detectado"
 
-# 6. Placas de rede (Ignora loopback)
-NETWORKS=$(ip -4 -br addr show 2>/dev/null | grep -v "^lo" | awk '{print $1" ("$3")"}' | paste -sd ", " -)
+# 6. Placas de rede (Usa o 'ip -o' que é compatível com Deb/RHEL antigos e novos)
+# Ignora a interface de loopback 'lo'
+NETWORKS=$(ip -4 -o addr show 2>/dev/null | grep -v " lo " | awk '{print $2" ("$4")"}' | paste -sd ", " -)
 [ -z "$NETWORKS" ] && NETWORKS="Nenhuma rede detectada"
 
 

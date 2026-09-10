@@ -1,9 +1,8 @@
-sudo apt update && \
-sudo apt install -y gnupg curl python3-venv && \
+sudo apt-get install -y gnupg curl python3-venv && \
 curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg --yes --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg && \
 echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list && \
-sudo apt update && \
-sudo apt install -y mongodb-org && \
+sudo apt-get update -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/mongodb-org-7.0.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" && \
+sudo apt-get install -y mongodb-org && \
 sudo systemctl start mongod && \
 sudo systemctl enable mongod && \
 mkdir -p ~/mongo_stress && cd ~/mongo_stress && \

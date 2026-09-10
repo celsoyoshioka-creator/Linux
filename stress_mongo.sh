@@ -14,7 +14,7 @@ import pymongo, time, random, string, concurrent.futures
 MONGO_URI = "mongodb://localhost:27017/"
 DB_NAME = "stress_db"
 COLLECTION_NAME = "stress_col"
-NUM_THREADS = 50
+NUM_THREADS = 500
 OPS_PER_THREAD = 1000
 
 def generate_random_string(length=50): 

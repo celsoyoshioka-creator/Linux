@@ -1,4 +1,6 @@
-STRESS_MODE="ambos" && \
+read -p "Qual teste de stress você quer executar? (cpu / ram / ambos) [ambos]: " STRESS_MODE && \
+STRESS_MODE=${STRESS_MODE:-ambos} && \
+STRESS_MODE=$(echo "$STRESS_MODE" | tr '[:upper:]' '[:lower:]') && \
 sudo apt-get install -y gnupg curl python3-venv && \
 curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg --yes --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg && \
 echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list && \
@@ -12,7 +14,7 @@ python3 -m venv venv && \
 cat << 'EOF' > stress_test.py
 import pymongo, time, random, string, concurrent.futures, sys
 
-# Recebe o modo do bash, padrão é 'ambos'
+# Recebe o modo do bash
 mode = sys.argv[1].lower() if len(sys.argv) > 1 else 'ambos'
 
 MONGO_URI = "mongodb://localhost:27017/"
@@ -20,23 +22,21 @@ DB_NAME = "stress_db"
 COLLECTION_NAME = "stress_col"
 NUM_THREADS = 50
 
-# Configurações dinâmicas de acordo com o alvo do stress
 if mode == "cpu":
     OPS = 1000
-    PAYLOAD_SIZE = 100 # 100 bytes (foco em velocidade e volume)
+    PAYLOAD_SIZE = 100 
 elif mode == "ram":
     OPS = 50
-    PAYLOAD_SIZE = 2 * 1024 * 1024 # 2 Megabytes por doc (foco em peso)
+    PAYLOAD_SIZE = 2 * 1024 * 1024 
 else:
     mode = "ambos"
     OPS = 200
-    PAYLOAD_SIZE = 1 * 1024 * 1024 # 1 Megabyte
+    PAYLOAD_SIZE = 1 * 1024 * 1024 
 
 def worker_task(thread_id):
     client = pymongo.MongoClient(MONGO_URI)
     col = client[DB_NAME][COLLECTION_NAME]
     
-    # Gera o peso do payload apenas uma vez para não estressar o Python, e sim o Mongo
     if mode == "cpu":
         payload = ''.join(random.choices(string.ascii_letters, k=PAYLOAD_SIZE))
     else:
@@ -44,15 +44,11 @@ def worker_task(thread_id):
         
     start_time = time.time()
     for i in range(OPS):
-        # Escrita
         col.insert_one({"t_id": thread_id, "idx": i, "data": payload, "ts": time.time()})
         
-        # Leitura pesada de acordo com o modo
         if mode == "cpu":
-            # Regex força a CPU a bater texto por texto buscando o padrão
             list(col.find({"t_id": thread_id, "data": {"$regex": ".*Z.*"}}).limit(50))
         elif mode == "ram":
-            # Sort in-memory obriga o Mongo a carregar documentos de 2MB na RAM
             list(col.find({"t_id": thread_id}).sort("ts", -1).limit(10))
         else:
             list(col.find({"t_id": thread_id, "data": {"$regex": ".*Z.*"}}).sort("ts", -1).limit(5))
@@ -61,7 +57,7 @@ def worker_task(thread_id):
     return time.time() - start_time
 
 if __name__ == "__main__":
-    print(f"🔥 Iniciando Stress Test no MongoDB...")
+    print(f"\n🔥 Iniciando Stress Test no MongoDB...")
     print(f"Modo Selecionado:    {mode.upper()}")
     print(f"Conexões simultâneas: {NUM_THREADS} | Ops/Thread: {OPS}")
     print(f"Tamanho do Documento: {PAYLOAD_SIZE / 1024:.0f} KB")
@@ -82,4 +78,4 @@ if __name__ == "__main__":
     print(f"Throughput (OPS):    {total_ops / total_time:.2f} operações por segundo")
     print("=" * 40)
 EOF
-./venv/bin/python stress_test.py $STRESS_MODE
+./venv/bin/python stress_test.py "$STRESS_MODE"

@@ -1,16 +1,20 @@
-read -p "Qual teste de stress você quer executar? (cpu / ram / ambos) [ambos]: " STRESS_MODE && \
-STRESS_MODE=${STRESS_MODE:-ambos} && \
-STRESS_MODE=$(echo "$STRESS_MODE" | tr '[:upper:]' '[:lower:]') && \
-sudo apt-get install -y gnupg curl python3-venv && \
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg --yes --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg && \
-echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list && \
-sudo apt-get update -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/mongodb-org-7.0.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" && \
-sudo apt-get install -y mongodb-org && \
-sudo systemctl start mongod && \
-sudo systemctl enable mongod && \
-mkdir -p ~/mongo_stress && cd ~/mongo_stress && \
-python3 -m venv venv && \
-./venv/bin/pip install pymongo && \
+{
+read -p "Qual teste de stress você quer executar? (cpu / ram / ambos) [ambos]: " STRESS_MODE
+STRESS_MODE=${STRESS_MODE:-ambos}
+STRESS_MODE=$(echo "$STRESS_MODE" | tr '[:upper:]' '[:lower:]')
+
+sudo apt-get install -y gnupg curl python3-venv
+curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg --yes --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+sudo apt-get update -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/mongodb-org-7.0.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+sudo apt-get install -y mongodb-org
+sudo systemctl start mongod
+sudo systemctl enable mongod
+
+mkdir -p ~/mongo_stress && cd ~/mongo_stress
+python3 -m venv venv
+./venv/bin/pip install pymongo
+
 cat << 'EOF' > stress_test.py
 import pymongo, time, random, string, concurrent.futures, sys
 
@@ -78,4 +82,6 @@ if __name__ == "__main__":
     print(f"Throughput (OPS):    {total_ops / total_time:.2f} operações por segundo")
     print("=" * 40)
 EOF
+
 ./venv/bin/python stress_test.py "$STRESS_MODE"
+}

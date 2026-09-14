@@ -1,20 +1,41 @@
-{
-read -p "Qual teste de stress você quer executar? (cpu / ram / ambos) [ambos]: " STRESS_MODE
+#!/bin/bash
+
+# 1. Verifica se o usuário passou um argumento na chamada (ex: ... | sudo bash -s cpu)
+STRESS_MODE=$1
+
+# 2. Se não passou argumento, faz a pergunta interativa forçando a leitura do terminal
+if [ -z "$STRESS_MODE" ]; then
+    echo -n "Qual teste de stress você quer executar? (cpu / ram / ambos) [ambos]: " > /dev/tty
+    read STRESS_MODE < /dev/tty
+fi
+
+# 3. Trata a variável
 STRESS_MODE=${STRESS_MODE:-ambos}
 STRESS_MODE=$(echo "$STRESS_MODE" | tr '[:upper:]' '[:lower:]')
 
-sudo apt-get install -y gnupg curl python3-venv
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg --yes --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
-echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-sudo apt-get update -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/mongodb-org-7.0.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
-sudo apt-get install -y mongodb-org
-sudo systemctl start mongod
-sudo systemctl enable mongod
+echo "Iniciando preparação para o teste: $STRESS_MODE..."
 
-mkdir -p ~/mongo_stress && cd ~/mongo_stress
+# 4. Instala dependências e repositório (sem os suds, pois o script já roda via sudo bash)
+apt-get install -y gnupg curl python3-venv
+
+curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --yes --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+apt-get update -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/mongodb-org-7.0.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+apt-get install -y mongodb-org
+
+systemctl start mongod
+systemctl enable mongod
+
+# 5. Prepara o ambiente Python em /opt
+WORK_DIR="/opt/mongo_stress"
+mkdir -p $WORK_DIR
+cd $WORK_DIR
+
 python3 -m venv venv
 ./venv/bin/pip install pymongo
 
+# 6. Gera o script Python de teste
 cat << 'EOF' > stress_test.py
 import pymongo, time, random, string, concurrent.futures, sys
 
@@ -83,5 +104,5 @@ if __name__ == "__main__":
     print("=" * 40)
 EOF
 
+# 7. Executa o teste
 ./venv/bin/python stress_test.py "$STRESS_MODE"
-}

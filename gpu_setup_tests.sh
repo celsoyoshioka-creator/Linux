@@ -102,6 +102,23 @@ apt-mark hold \
   "linux-modules-$CURRENT_KERNEL" \
   "linux-modules-extra-$CURRENT_KERNEL" >/dev/null 2>&1 || true
 
+# PROTEÇÃO DAS NICs BROADCOM
+# Evita que o DKMS tente compilar o módulo bnxt_en e quebre a instalação do APT
+log_info "Aplicando proteção para ignorar as NICs Broadcom (evitando falhas do DKMS no bnxt_en)..."
+if command -v dkms &> /dev/null; then
+  dkms remove -m bnxt_en -v 1.10.3.237.1.137.0 --all 2>/dev/null || true
+fi
+
+if ls /usr/src/bnxt_en-* &> /dev/null; then
+  sed -i 's/^AUTOINSTALL=.*/AUTOINSTALL="no"/' /usr/src/bnxt_en-*/dkms.conf 2>/dev/null || true
+fi
+
+# LIMPEZA DE PACOTES CONFLITANTES E INSTALAÇÕES ANTIGAS
+wait_for_apt_locks
+log_info "Removendo pacotes conflitantes e resíduos de drivers NVIDIA/CUDA antigos..."
+apt-get purge -y "*nvidia*" "*cuda*" "*cublas*" "*cufft*" "*cufile*" "*curand*" "*cusolver*" "*cusparse*" "*gds-tools*" "*npp*" "*nvjpeg*" "nsight*" "datacenter-gpu-manager*" 2>/dev/null || true
+apt-get autoremove -y 2>/dev/null || true
+
 # Atualização do repositório e instalação das dependências básicas
 wait_for_apt_locks
 log_info "Atualizando os repositórios de pacotes do sistema..."
@@ -120,6 +137,16 @@ apt-get install -y \
   -o Dpkg::Options::="--force-confdef" \
   -o Dpkg::Options::="--force-confold" \
   linux-headers-"$KERNEL_BASE" linux-headers-"$CURRENT_KERNEL"
+
+# LIMPEZA DO DKMS DA NVIDIA
+log_info "Limpando módulos antigos da NVIDIA no DKMS para evitar erros de sobreposição..."
+if command -v dkms &> /dev/null; then
+  dkms status | grep -i nvidia | while read -r line; do
+    NOME_MOD=$(echo "$line" | awk -F', ' '{print $1}')
+    VERSAO_MOD=$(echo "$line" | awk -F', ' '{print $2}' | awk -F': ' '{print $1}')
+    dkms remove -m "$NOME_MOD" -v "$VERSAO_MOD" --all 2>/dev/null || true
+  done
+fi
 
 # Instala os drivers de GPU recomendados
 wait_for_apt_locks

@@ -26,7 +26,7 @@ apt-mark hold \
 
 # Configurações gerais do monitoramento
 INTERVALO_CHECAGEM=1    # Intervalo de verificação em segundos
-TESTE_CMD="dcgmi diag -r 4" # Comando de estresse completo nível 4 do DCGM
+TESTE_CMD="dcgmi diag -r 4 -p nvbandwidth.is_allowed=0" # Comando de estresse completo nível 4 do DCGM
 LOG_ERRO_DCGM="/tmp/dcgm_teste_erro.log" # Log temporário interno
 LOG_SAIDA_FINAL="/var/log/dcgm_test_output.log" # Log permanente de auditoria do teste
 

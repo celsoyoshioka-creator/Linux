@@ -58,30 +58,30 @@ trap cleanup EXIT
 on_error() {
     local rc=$?
     local line="${BASH_LINENO[0]:-unknown}"
-    error "Falha inesperada na linha ${line}; código de saída ${rc}."
-    error "Consulte o log: ${LOG_FILE:-não inicializado}"
+    error "Unexpected error on line ${line}; exit code ${rc}."
+    error "See log: ${LOG_FILE:-not initialized}"
     exit "$rc"
 }
 trap on_error ERR
 
 pause() {
-    read -r -p $'\nPressione ENTER para continuar...' _ || true
+    read -r -p $'\nPress ENTER to continue...' _ || true
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
 require_root() {
-    [[ "${EUID}" -eq 0 ]] || die "Execute como root: sudo bash ${SCRIPT_NAME}"
+    [[ "${EUID}" -eq 0 ]] || die "Run as root: sudo bash ${SCRIPT_NAME}"
 }
 
 init_logging() {
     install -d -m 0750 "$LOG_DIR" "$REPORT_DIR" ||
-        die "Não foi possível criar ${LOG_DIR}."
+        die "Could not create ${LOG_DIR}."
     LOG_FILE="${LOG_DIR}/homologation-${RUN_ID}.log"
     REPORT_FILE="${REPORT_DIR}/report-${RUN_ID}.txt"
-    touch "$LOG_FILE" "$REPORT_FILE" || die "Não foi possível criar os arquivos de log/relatório."
+    touch "$LOG_FILE" "$REPORT_FILE" || die "Could not create the log/report files."
     chmod 0640 "$LOG_FILE" "$REPORT_FILE"
-    info "${SCRIPT_NAME} v${SCRIPT_VERSION} iniciado."
+    info "${SCRIPT_NAME} v${SCRIPT_VERSION} started."
 }
 
 report() {
@@ -111,35 +111,35 @@ confirm_exact() {
     local expected="$1"
     local prompt="$2"
     local answer
-    read -r -p "${prompt} Digite '${expected}' para confirmar: " answer
+    read -r -p "${prompt} Enter '${expected}' para confirmar: " answer
     [[ "$answer" == "$expected" ]]
 }
 
 # ---------- Pre-flight and platform ------------------------------------------
 check_platform() {
-    section "PRE-FLIGHT / SISTEMA OPERACIONAL"
-    [[ -r /etc/os-release ]] || die "Não foi possível identificar o sistema operacional."
+    section "PRE-FLIGHT / OPERATING SYSTEM"
+    [[ -r /etc/os-release ]] || die "Could not identify the operating system."
     # shellcheck disable=SC1091
     source /etc/os-release
-    printf 'Sistema: %s\nVersão: %s\nKernel: %s\nArquitetura: %s\n' \
+    printf 'System: %s\nVersion: %s\nKernel: %s\nArchitecture: %s\n' \
         "${PRETTY_NAME:-unknown}" "${VERSION_ID:-unknown}" "$(uname -r)" "$(uname -m)"
-    report "Sistema: ${PRETTY_NAME:-unknown}"
-    report "Versão: ${VERSION_ID:-unknown}"
+    report "System: ${PRETTY_NAME:-unknown}"
+    report "Version: ${VERSION_ID:-unknown}"
     report "Kernel: $(uname -r)"
-    report "Arquitetura: $(uname -m)"
+    report "Architecture: $(uname -m)"
 
     if [[ "${ID:-}" != "ubuntu" ]]; then
-        warn "Sistema não identificado como Ubuntu. O script foi projetado para ${TARGET_OS}."
-        status_line WARNING "Sistema operacional fora do alvo recomendado."
+        warn "System not identified as Ubuntu. This script was designed for ${TARGET_OS}."
+        status_line WARNING "Operating system is outside the recommended target."
     elif [[ "${VERSION_ID:-}" != "24.04" ]]; then
-        warn "Ubuntu ${VERSION_ID:-desconhecido}; alvo recomendado: 24.04 LTS."
-        status_line WARNING "Versão Ubuntu diferente de 24.04."
+        warn "Ubuntu ${VERSION_ID:-unknown}; recommended target: 24.04 LTS."
+        status_line WARNING "Ubuntu version differs from 24.04."
     else
         status_line PASS "Ubuntu 24.04 detectado."
     fi
 
     for cmd in awk grep sed date tee install; do
-        have "$cmd" || die "Comando essencial ausente: $cmd"
+        have "$cmd" || die "Required command is missing: $cmd"
     done
 }
 
@@ -155,7 +155,7 @@ installed_packages_matching() {
 }
 
 ensure_dependencies() {
-    section "DEPENDÊNCIAS"
+    section "DEPENDENCIES"
     local commands=(lsblk findmnt smartctl fio hdparm lspci lshw ethtool iperf3
                     ipmitool memtester dmidecode dkms)
     local missing=()
@@ -165,28 +165,28 @@ ensure_dependencies() {
     done
 
     if ((${#missing[@]} == 0)); then
-        status_line PASS "Todos os comandos opcionais principais estão disponíveis."
+        status_line PASS "All main optional commands are available."
         return
     fi
 
-    printf 'Comandos ausentes: %s\n' "${missing[*]}"
-    status_line WARNING "Dependências opcionais ausentes: ${missing[*]}"
+    printf 'Missing commands: %s\n' "${missing[*]}"
+    status_line WARNING "Missing optional dependencies: ${missing[*]}"
     echo
-    echo "O script não instala pacotes automaticamente."
-    if confirm_exact INSTALL "Deseja instalar os pacotes Ubuntu correspondentes agora?"; then
-        have apt-get || die "apt-get não encontrado."
+    echo "The script does not install packages automatically."
+    if confirm_exact INSTALL "Install the corresponding Ubuntu packages now?"; then
+        have apt-get || die "apt-get not found."
         apt-get update
         apt-get install -y smartmontools fio hdparm util-linux pciutils lshw \
             ethtool iperf3 ipmitool memtester dmidecode dkms
-        status_line PASS "Instalação solicitada concluída."
+        status_line PASS "Requested installation completed."
     else
-        info "Instalação de dependências ignorada pelo operador."
+        info "Dependency installation skipped by the operator."
     fi
 }
 
 # ---------- Inventory ---------------------------------------------------------
 system_inventory() {
-    section "INVENTÁRIO DO SERVIDOR"
+    section "SERVER INVENTORY"
     local cmd
     for cmd in hostnamectl lscpu free lsblk lspci; do
         if have "$cmd"; then
@@ -201,20 +201,20 @@ system_inventory() {
         fi
     done
     if have dmidecode; then
-        printf '\n--- Fabricante / modelo / BIOS ---\n'
+        printf '\n--- Manufacturer / model / BIOS ---\n'
         dmidecode -t system -t bios 2>/dev/null |
             grep -E 'Manufacturer:|Product Name:|Version:|Release Date:' || true
-        printf '\n--- Memória física (DIMMs) ---\n'
+        printf '\n--- Physical memory (DIMMs) ---\n'
         dmidecode -t memory 2>/dev/null |
             grep -E 'Locator:|Bank Locator:|Size:|Manufacturer:|Part Number:|Speed:|Configured Memory Speed:' || true
     else
-        warn "dmidecode não disponível; inventário SMBIOS omitido."
+        warn "dmidecode is unavailable; SMBIOS inventory skipped."
     fi
 }
 
 # ---------- Disk module -------------------------------------------------------
 list_disks() {
-    section "DISCOS FÍSICOS"
+    section "PHYSICAL DISKS"
     lsblk -d -e 7 -o NAME,PATH,SIZE,MODEL,SERIAL,ROTA,TRAN,TYPE
 }
 
@@ -225,14 +225,14 @@ disk_device_valid() {
 
 disk_health() {
     local dev="$1"
-    disk_device_valid "$dev" || { error "Dispositivo de bloco inválido: $dev"; return 1; }
-    section "SMART / SAÚDE DO DISCO: $dev"
+    disk_device_valid "$dev" || { error "Invalid block device: $dev"; return 1; }
+    section "SMART / DISK HEALTH: $dev"
     if ! have smartctl; then
-        status_line WARNING "smartctl não instalado."
+        status_line WARNING "smartctl is not installed."
         return 1
     fi
-    smartctl -H "$dev" || status_line WARNING "SMART retornou código diferente de zero para $dev."
-    smartctl -x "$dev" || status_line WARNING "Não foi possível obter todos os dados SMART de $dev."
+    smartctl -H "$dev" || status_line WARNING "SMART returned a non-zero exit code for $dev."
+    smartctl -x "$dev" || status_line WARNING "Could not retrieve all SMART data for $dev."
 }
 
 disk_is_busy() {
@@ -240,7 +240,7 @@ disk_is_busy() {
     local base
     base="$(basename "$dev")"
 
-    # Partições montadas, swap, holders (mdraid, device-mapper/LVM) e root filesystem.
+    # Mounted partitions, swap, holders (mdraid, device-mapper/LVM), and root filesystem.
     if lsblk -nrpo MOUNTPOINT "$dev" | grep -q '[^[:space:]]'; then
         return 0
     fi
@@ -259,7 +259,7 @@ disk_is_busy() {
     root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
     [[ "$root_source" == "$dev" ]] && return 0
 
-    # Não permitir dispositivo pai de uma raiz montada em device-mapper/RAID.
+    # Do not allow a parent device of a root filesystem mounted on device-mapper/RAID.
     if lsblk -s -nrpo NAME "$root_source" 2>/dev/null | grep -Fxq "$dev"; then
         return 0
     fi
@@ -268,225 +268,225 @@ disk_is_busy() {
 
 disk_file_test() {
     local dev="$1"
-    disk_device_valid "$dev" || { error "Dispositivo inválido: $dev"; return 1; }
-    have fio || { error "fio não instalado."; return 1; }
+    disk_device_valid "$dev" || { error "Invalid device: $dev"; return 1; }
+    have fio || { error "fio is not installed."; return 1; }
 
-    section "FIO NÃO DESTRUTIVO (ARQUIVO)"
-    echo "O teste grava em um arquivo temporário dentro de um filesystem montado."
-    echo "Não grava diretamente em /dev, mas gera I/O real e consome espaço."
-    echo "Para resultados representativos, prefira um volume de dados dedicado."
+    section "NON-DESTRUCTIVE FIO (FILE-BASED)"
+    echo "The test writes to a temporary file inside a mounted filesystem."
+    echo "It does not write directly to /dev, but it generates real I/O and consumes disk space."
+    echo "For representative results, use a dedicated data volume."
     echo
     lsblk -o NAME,PATH,SIZE,MODEL,SERIAL,FSTYPE,MOUNTPOINTS "$dev"
 
     local mountpoint
     mountpoint="$(lsblk -nrpo MOUNTPOINT "$dev" | awk 'NF {print; exit}')"
     if [[ -z "$mountpoint" ]]; then
-        warn "Nenhum ponto de montagem encontrado no dispositivo. Teste cancelado."
-        status_line NOT_TESTED "FIO não executado: dispositivo sem filesystem montado."
+        warn "No mount point found for this device. Test cancelled."
+        status_line NOT_TESTED "FIO not run: device has no mounted filesystem."
         return 1
     fi
     if [[ "$mountpoint" == "/" ]]; then
-        warn "O teste no filesystem raiz pode afetar o sistema e serviços."
-        if ! confirm_exact ROOTFS "Confirma executar o teste no filesystem raiz?"; then
-            status_line NOT_TESTED "FIO cancelado pelo operador."
+        warn "Testing on the root filesystem may affect the system and services."
+        if ! confirm_exact ROOTFS "Confirm running the test on the root filesystem?"; then
+            status_line NOT_TESTED "FIO cancelled by the operator."
             return 0
         fi
     fi
 
     local available_kb available_mb reserve_mb max_mb profile test_size_mb runtime rw_mode
     available_kb="$(df -Pk "$mountpoint" | awk 'NR==2 {print $4}')"
-    [[ "$available_kb" =~ ^[0-9]+$ ]] || { error "Não foi possível obter espaço livre."; return 1; }
+    [[ "$available_kb" =~ ^[0-9]+$ ]] || { error "Could not determine available free space."; return 1; }
     available_mb=$((available_kb / 1024))
 
-    # Preserva pelo menos 20% do espaço livre. O limite também evita arquivos
-    # descontroladamente grandes; o operador pode escolher um tamanho menor.
+    # Preserve at least 20% of free space. The limit also prevents test files
+    # from becoming excessively large; the operator can choose a smaller size.
     reserve_mb=$((available_mb / 5))
     max_mb=$((available_mb - reserve_mb))
-    (( max_mb > 102400 )) && max_mb=102400  # teto operacional de 100 GiB
+    (( max_mb > 102400 )) && max_mb=102400  # operational cap of 100 GiB
     if (( max_mb < 1024 )); then
-        warn "Espaço insuficiente: são necessários pelo menos 1 GiB de margem de teste."
-        status_line NOT_TESTED "FIO cancelado: espaço livre insuficiente."
+        warn "Insufficient space: at least 1 GiB of test headroom is required."
+        status_line NOT_TESTED "FIO cancelled: insufficient free space."
         return 1
     fi
 
     echo
-    echo "Espaço livre: ${available_mb} MiB"
-    echo "Tamanho máximo permitido: ${max_mb} MiB (preserva ao menos 20% do espaço livre; teto 100 GiB)."
+    echo "Available space: ${available_mb} MiB"
+    echo "Maximum allowed test size: ${max_mb} MiB (preserves at least 20% of free space; 100 GiB cap)."
     echo
-    echo "Perfis:"
-    echo "1 - Rápido:       1 GiB, 30 segundos, randrw 4k 50/50"
-    echo "2 - Estendido:   10 GiB, 120 segundos, randrw 4k 50/50"
-    echo "3 - Stress:      50 GiB, 600 segundos, randrw 4k 50/50"
-    echo "4 - Personalizado: informar tamanho e duração"
-    echo "5 - Cancelar"
-    read -r -p "Selecione o perfil: " profile
+    echo "Profiles:"
+    echo "1 - Quick:       1 GiB, 30 seconds, randrw 4k 50/50"
+    echo "2 - Estendido:   10 GiB, 120 seconds, randrw 4k 50/50"
+    echo "3 - Stress:      50 GiB, 600 seconds, randrw 4k 50/50"
+    echo "4 - Custom: specify size and duration"
+    echo "5 - Cancel"
+    read -r -p "Select profile: " profile
 
     case "$profile" in
         1) test_size_mb=1024; runtime=30; rw_mode=randrw ;;
         2) test_size_mb=10240; runtime=120; rw_mode=randrw ;;
         3) test_size_mb=51200; runtime=600; rw_mode=randrw ;;
         4)
-            read -r -p "Tamanho do arquivo de teste em MiB: " test_size_mb
-            read -r -p "Duração em segundos (30 a 3600): " runtime
+            read -r -p "Test file size in MiB: " test_size_mb
+            read -r -p "Duration in seconds (30 to 3600): " runtime
             [[ "$test_size_mb" =~ ^[1-9][0-9]*$ ]] ||
-                { error "Tamanho inválido."; return 1; }
+                { error "Invalid size."; return 1; }
             [[ "$runtime" =~ ^[0-9]+$ ]] && (( runtime >= 30 && runtime <= 3600 )) ||
-                { error "Duração inválida (30 a 3600 segundos)."; return 1; }
+                { error "Invalid duration (30 to 3600 seconds)."; return 1; }
             rw_mode=randrw
             ;;
-        5) info "Teste cancelado."; return 0 ;;
-        *) error "Perfil inválido."; return 1 ;;
+        5) info "Test cancelled."; return 0 ;;
+        *) error "Invalid profile."; return 1 ;;
     esac
 
     (( test_size_mb <= max_mb )) || {
-        error "Perfil/tamanho excede o limite seguro de ${max_mb} MiB para este filesystem."
+        error "Profile/size exceeds the safe limit of ${max_mb} MiB for this filesystem."
         return 1
     }
 
     echo
-    echo "Resumo do teste:"
-    echo "  Dispositivo informado: $dev"
-    echo "  Ponto de montagem:     $mountpoint"
-    echo "  Arquivo temporário:    ${test_size_mb} MiB"
-    echo "  Duração:               ${runtime} segundos"
-    echo "  Padrão:                randrw 4k / 50% leitura e 50% gravação"
+    echo "Test summary:"
+    echo "  Specified device: $dev"
+    echo "  Mount point:     $mountpoint"
+    echo "  Temporary file:            ${test_size_mb} MiB"
+    echo "  Duration:               ${runtime} seconds"
+    echo "  Pattern:                randrw 4k / 50% read and 50% write"
     echo
-    echo "ATENÇÃO: apesar de não ser raw/destrutivo, o teste grava dados,"
-    echo "consome espaço, gera carga e pode impactar aplicações."
-    if ! confirm_exact START-FIO "Digite START-FIO para iniciar"; then
-        status_line NOT_TESTED "FIO cancelado pelo operador."
+    echo "WARNING: although this is not a raw/destructive test, it writes data,"
+    echo "consumes disk space, creates load, and may affect applications."
+    if ! confirm_exact START-FIO "Enter START-FIO to start"; then
+        status_line NOT_TESTED "FIO cancelled by the operator."
         return 0
     fi
 
     local test_file
     test_file="$(mktemp "${mountpoint%/}/.homologation-fio.XXXXXX")"
     TEMP_FILES+=("$test_file")
-    info "Arquivo temporário: $test_file"
+    info "Temporary file: $test_file"
     fio --name=homologation-randrw --filename="$test_file" \
         --size="${test_size_mb}M" --rw="$rw_mode" --rwmixread=50 --bs=4k \
         --ioengine=libaio --iodepth=32 --numjobs=1 --direct=1 \
         --time_based --runtime="$runtime" --group_reporting
     rm -f -- "$test_file"
-    status_line PASS "FIO concluído: ${test_size_mb} MiB / ${runtime}s em $mountpoint."
-    info "Nota: teste por arquivo avalia o caminho filesystem/storage; para homologação completa, correlacione com testes do fabricante, RAID/HBA e métricas do dispositivo."
+    status_line PASS "FIO completed: ${test_size_mb} MiB / ${runtime}s on $mountpoint."
+    info "Note: file-based testing evaluates the filesystem/storage path. For complete qualification, correlate results with vendor tests, RAID/HBA checks, and device metrics."
 }
 
 menu_disks() {
     while true; do
         echo
-        echo "=== DISCOS ==="
-        echo "1 - Listar discos"
-        echo "2 - SMART / saúde de um disco"
-        echo "3 - FIO por arquivo (rápido / estendido / stress)"
-        echo "4 - Voltar"
-        read -r -p "Opção: " opt
+        echo "=== DISKS ==="
+        echo "1 - List disks"
+        echo "2 - SMART / disk health"
+        echo "3 - File-based FIO (quick / extended / stress)"
+        echo "4 - Back"
+        read -r -p "Option: " opt
         case "$opt" in
             1) list_disks; pause ;;
             2)
                 list_disks
-                read -r -p "Dispositivo (ex.: /dev/sda ou /dev/nvme0n1): " dev
+                read -r -p "Device (e.g. /dev/sda or /dev/nvme0n1): " dev
                 disk_health "$dev"; pause ;;
             3)
                 list_disks
-                read -r -p "Dispositivo que contém o filesystem a testar: " dev
+                read -r -p "Device containing the filesystem to test: " dev
                 disk_file_test "$dev"; pause ;;
             4) break ;;
-            *) warn "Opção inválida." ;;
+            *) warn "Invalid option." ;;
         esac
     done
 }
 
 # ---------- RAM module --------------------------------------------------------
 ram_test() {
-    section "TESTE DE MEMÓRIA RAM"
-    have memtester || { error "memtester não instalado."; return 1; }
+    section "RAM MEMORY TEST"
+    have memtester || { error "memtester is not installed."; return 1; }
     free -h
     local available_kb max_mb requested loops reserve_mb
     available_kb="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
-    [[ "$available_kb" =~ ^[0-9]+$ ]] || { error "MemAvailable indisponível."; return 1; }
+    [[ "$available_kb" =~ ^[0-9]+$ ]] || { error "MemAvailable is unavailable."; return 1; }
     max_mb=$(( available_kb / 1024 ))
     reserve_mb=1024
     (( max_mb > reserve_mb )) && max_mb=$((max_mb - reserve_mb)) || max_mb=0
 
-    echo "Memória disponível aproximada: ${available_kb} KiB."
-    echo "Limite sugerido para o teste: ${max_mb} MiB (reserva de 1 GiB)."
-    read -r -p "Quantidade em MiB para testar: " requested
-    read -r -p "Número de ciclos: " loops
+    echo "Approximate available memory: ${available_kb} KiB."
+    echo "Suggested test limit: ${max_mb} MiB (reserva de 1 GiB)."
+    read -r -p "Amount to test in MiB: " requested
+    read -r -p "Number of passes: " loops
     [[ "$requested" =~ ^[1-9][0-9]*$ && "$loops" =~ ^[1-9][0-9]*$ ]] ||
-        { error "Informe números inteiros positivos."; return 1; }
+        { error "Enter positive integers."; return 1; }
     (( requested <= max_mb )) ||
-        { error "Quantidade excede o limite calculado (${max_mb} MiB)."; return 1; }
-    (( loops <= 100 )) || { error "Limite de segurança: no máximo 100 ciclos."; return 1; }
+        { error "Requested amount exceeds the calculated limit (${max_mb} MiB)."; return 1; }
+    (( loops <= 100 )) || { error "Safety limit: no more than 100 passes."; return 1; }
 
-    if confirm_exact RUN "O teste pode pressionar a memória e afetar serviços. Deseja continuar?"; then
+    if confirm_exact RUN "The test may put pressure on memory and affect services. Continue?"; then
         memtester "${requested}M" "$loops"
-        status_line PASS "memtester terminou sem reportar erro."
+        status_line PASS "memtester completed without reporting errors."
     else
-        status_line NOT_TESTED "Teste de RAM cancelado."
+        status_line NOT_TESTED "RAM test cancelled."
     fi
 }
 
 
 memtest86_guidance() {
-    section "MEMTEST86+ / TESTE DE RAM FORA DO SISTEMA OPERACIONAL"
-    echo "O memtester executado dentro do Ubuntu testa somente a memória que o"
-    echo "processo consegue alocar e não substitui um teste de boot."
+    section "MEMTEST86+ / OFFLINE RAM TEST"
+    echo "memtester running inside Ubuntu only tests the memory that the"
+    echo "process can allocate and does not replace a boot-time test."
     echo
-    echo "Para um teste mais abrangente:"
-    echo "  1. Planeje uma janela de manutenção e encerre as aplicações."
-    echo "  2. Verifique se o pacote memtest86+ está disponível para sua versão/arquitetura."
-    echo "  3. Instale-o somente após validar a política de pacotes do servidor."
-    echo "  4. Verifique as entradas do GRUB e confirme que o firmware/boot mode"
-    echo "     (UEFI ou Legacy) oferece uma entrada Memtest86+."
-    echo "  5. Reinicie em janela autorizada e selecione Memtest86+ no menu de boot."
-    echo "  6. Execute múltiplos passes completos; registre versão, duração e erros."
-    echo "  7. Retorne ao Ubuntu e anexe o resultado ao relatório de homologação."
+    echo "For more comprehensive testing:"
+    echo "  1. Plan a maintenance window and stop applications."
+    echo "  2. Check whether the memtest86+ package is available for your release/architecture."
+    echo "  3. Install it only after validating the server's package policy."
+    echo "  4. Check the GRUB entries and confirm that the firmware/boot mode"
+    echo "     (UEFI or Legacy) provides a Memtest86+ entry."
+    echo "  5. Reboot during the approved maintenance window and select Memtest86+ from the boot menu."
+    echo "  6. Run multiple complete passes; record the version, duration, and errors."
+    echo "  7. Return to Ubuntu and attach the results to the qualification report."
     echo
-    echo "Verificações locais (somente leitura):"
+    echo "Local checks (read-only):"
     if dpkg-query -W -f='${db:Status-Abbrev} ${Version}\n' memtest86+ 2>/dev/null | grep -q '^ii'; then
-        dpkg-query -W -f='Pacote memtest86+: ${Version}\n' memtest86+ 2>/dev/null || true
+        dpkg-query -W -f='memtest86+ package: ${Version}\n' memtest86+ 2>/dev/null || true
     else
-        echo "Pacote memtest86+: não instalado."
+        echo "memtest86+ package: not installed."
     fi
     if [[ -d /sys/firmware/efi ]]; then
-        echo "Modo de boot atual: UEFI"
+        echo "Current boot mode: UEFI"
     else
-        echo "Modo de boot atual: Legacy BIOS ou EFI não exposto pelo sistema."
+        echo "Current boot mode: Legacy BIOS or EFI mode is not exposed by the system."
     fi
     if have grub-reboot; then
-        echo "GRUB detectado. Verifique as entradas disponíveis com:"
+        echo "GRUB detected. Check available entries with:"
         echo "  grep -i -E 'memtest|menuentry' /boot/grub/grub.cfg"
     fi
     echo
-    status_line WARNING "Memtest86+ exige reinicialização e teste fora do Ubuntu; esta ferramenta não agenda nem executa o reboot."
+    status_line WARNING "Memtest86+ requires a reboot and testing outside Ubuntu; this tool does not schedule or perform the reboot."
 }
 
 menu_memory() {
     while true; do
         echo
-        echo "=== MEMÓRIA RAM ==="
-        echo "1 - Exibir memória"
-        echo "2 - Exibir DIMMs (dmidecode)"
-        echo "3 - Executar memtester (teste em operação)"
-        echo "4 - Orientações para Memtest86+ (boot/offline)"
-        echo "5 - Voltar"
-        read -r -p "Opção: " opt
+        echo "=== RAM MEMORY ==="
+        echo "1 - Show memory"
+        echo "2 - Show DIMMs (dmidecode)"
+        echo "3 - Run memtester (online test)"
+        echo "4 - Memtest86+ guidance (boot/offline)"
+        echo "5 - Back"
+        read -r -p "Option: " opt
         case "$opt" in
             1) free -h; pause ;;
-            2) have dmidecode && dmidecode -t memory || warn "dmidecode indisponível."; pause ;;
+            2) have dmidecode && dmidecode -t memory || warn "dmidecode is unavailable."; pause ;;
             3) ram_test; pause ;;
             4) memtest86_guidance; pause ;;
             5) break ;;
-            *) warn "Opção inválida." ;;
+            *) warn "Invalid option." ;;
         esac
     done
 }
 
 # ---------- Network module ----------------------------------------------------
 detect_network_pci() {
-    section "CONTROLADORAS DE REDE PCI"
+    section "PCI NETWORK CONTROLLERS"
     if ! have lspci; then
-        warn "pciutils/lspci indisponível."
+        warn "pciutils/lspci is unavailable."
         return 1
     fi
     lspci -nnk | grep -iEA3 'Ethernet controller|Network controller' || true
@@ -498,8 +498,8 @@ network_interfaces() {
 
 inspect_interface() {
     local iface="$1"
-    ip link show dev "$iface" >/dev/null 2>&1 || { error "Interface inexistente: $iface"; return 1; }
-    section "DIAGNÓSTICO DE INTERFACE: $iface"
+    ip link show dev "$iface" >/dev/null 2>&1 || { error "Interface does not exist: $iface"; return 1; }
+    section "INTERFACE DIAGNOSTICS: $iface"
     ip -details link show dev "$iface"
     if have ethtool; then
         echo
@@ -511,7 +511,7 @@ inspect_interface() {
         echo
         ethtool -S "$iface" || true
     else
-        warn "ethtool não instalado."
+        warn "ethtool is not installed."
     fi
 
     local pci
@@ -523,47 +523,47 @@ inspect_interface() {
 }
 
 network_iperf() {
-    section "TESTE DE THROUGHPUT IPERF3"
-    have iperf3 || { error "iperf3 não instalado."; return 1; }
+    section "IPERF3 THROUGHPUT TEST"
+    have iperf3 || { error "iperf3 is not installed."; return 1; }
     local server duration
-    read -r -p "IP/hostname do servidor iperf3 (-s): " server
-    [[ -n "$server" ]] || { info "Teste cancelado."; return 0; }
-    read -r -p "Duração em segundos [10]: " duration
+    read -r -p "iperf3 server IP/hostname (-s): " server
+    [[ -n "$server" ]] || { info "Test cancelled."; return 0; }
+    read -r -p "Duration in seconds [10]: " duration
     duration="${duration:-10}"
     [[ "$duration" =~ ^[1-9][0-9]*$ ]] && (( duration <= 300 )) ||
-        { error "Duração inválida (1 a 300 segundos)."; return 1; }
+        { error "Invalid duration (1 to 300 seconds)."; return 1; }
     iperf3 -c "$server" -t "$duration" --get-server-output
 }
 
 menu_network() {
     while true; do
         echo
-        echo "=== REDE: BROADCOM / MELLANOX ==="
-        echo "1 - Detectar controladoras PCI"
-        echo "2 - Listar interfaces"
-        echo "3 - Inspecionar interface (driver, firmware, link, offload, counters, PCIe)"
-        echo "4 - Teste de throughput (iperf3)"
-        echo "5 - Voltar"
-        read -r -p "Opção: " opt
+        echo "=== NETWORK: BROADCOM / MELLANOX ==="
+        echo "1 - Detect PCI network controllers"
+        echo "2 - List interfaces"
+        echo "3 - Inspect interface (driver, firmware, link, offload, counters, PCIe)"
+        echo "4 - Throughput test (iperf3)"
+        echo "5 - Back"
+        read -r -p "Option: " opt
         case "$opt" in
             1) detect_network_pci; pause ;;
             2) network_interfaces; pause ;;
             3)
                 network_interfaces
-                read -r -p "Nome da interface: " iface
+                read -r -p "Interface name: " iface
                 inspect_interface "$iface"; pause ;;
             4) network_iperf; pause ;;
             5) break ;;
-            *) warn "Opção inválida." ;;
+            *) warn "Invalid option." ;;
         esac
     done
 }
 
 # ---------- NVIDIA / DCGM -----------------------------------------------------
 gpu_diagnostics() {
-    section "DIAGNÓSTICO NVIDIA GPU"
+    section "NVIDIA GPU DIAGNOSTICS"
     if ! have nvidia-smi; then
-        status_line NOT_TESTED "nvidia-smi não encontrado; driver NVIDIA pode não estar instalado/carregado."
+        status_line NOT_TESTED "nvidia-smi not found; the NVIDIA driver may not be installed or loaded."
         lspci -nn | grep -i nvidia || true
         return 1
     fi
@@ -581,15 +581,15 @@ gpu_diagnostics() {
         dcgmi discovery -l || status_line WARNING "DCGM discovery retornou erro."
         echo
         echo "--- DCGM diagnostic level 1 ---"
-        echo "O diagnóstico pode executar verificações adicionais e consumir recursos da GPU."
-        if confirm_exact DCGM "Deseja executar dcgmi diag -r 1?"; then
+        echo "Diagnostics may run additional checks and consume GPU resources."
+        if confirm_exact DCGM "Run dcgmi diag -r 1?"; then
             dcgmi diag -r 1
-            status_line PASS "DCGM diagnostic level 1 concluído."
+            status_line PASS "DCGM diagnostic level 1 completed."
         else
-            status_line NOT_TESTED "Diagnóstico DCGM não executado."
+            status_line NOT_TESTED "DCGM diagnostics not run."
         fi
     else
-        status_line WARNING "dcgmi não encontrado; diagnóstico DCGM não disponível."
+        status_line WARNING "dcgmi not found; DCGM diagnostics are unavailable."
     fi
 }
 
@@ -597,26 +597,26 @@ menu_gpu() {
     while true; do
         echo
         echo "=== NVIDIA GPU ==="
-        echo "1 - Detectar GPUs NVIDIA no PCIe"
-        echo "2 - Diagnóstico nvidia-smi / DCGM"
-        echo "3 - Voltar"
-        read -r -p "Opção: " opt
+        echo "1 - Detect NVIDIA GPUs on PCIe"
+        echo "2 - nvidia-smi / DCGM diagnostics"
+        echo "3 - Back"
+        read -r -p "Option: " opt
         case "$opt" in
             1) lspci -nn | grep -iE 'VGA|3D|Display|NVIDIA' || true; pause ;;
             2) gpu_diagnostics; pause ;;
             3) break ;;
-            *) warn "Opção inválida." ;;
+            *) warn "Invalid option." ;;
         esac
     done
 }
 
 # ---------- PCIe and DKMS -----------------------------------------------------
 pcie_inventory() {
-    section "INVENTÁRIO PCIe"
+    section "PCIe INVENTORY"
     if have lspci; then
         lspci -Dnn
         echo
-        echo "Resumo de velocidade/largura negociadas (quando expostas pelo kernel):"
+        echo "Negotiated link speed/width summary (when exposed by the kernel):"
         local d path
         while read -r d; do
             [[ -n "$d" ]] || continue
@@ -627,7 +627,7 @@ pcie_inventory() {
                 "$(cat "$path/current_link_width" 2>/dev/null || echo unknown)"
         done < <(lspci -D | awk '{print $1}')
     else
-        warn "lspci indisponível."
+        warn "lspci is unavailable."
     fi
 }
 
@@ -636,20 +636,20 @@ dkms_status() {
     if have dkms; then
         dkms status || status_line WARNING "dkms status retornou erro."
     else
-        status_line NOT_TESTED "DKMS não instalado."
+        status_line NOT_TESTED "DKMS is not installed."
     fi
     echo
-    echo "Módulos relevantes carregados:"
+    echo "Relevant loaded modules:"
     lsmod | grep -E 'bnxt_en|mlx5_core|nvidia|nvidia_uvm|nvidia_drm' || true
     echo
-    echo "Pacotes relacionados instalados:"
+    echo "Related installed packages:"
     dpkg-query -W -f='${binary:Package} ${Version}\n' 2>/dev/null |
         grep -Ei 'bnxt|broadcom|mlx|mellanox|nvidia|cuda|dcgm|linux-(image|headers)' || true
 }
 
 # ---------- APT hold management ----------------------------------------------
 show_holds() {
-    section "PACOTES APT EM HOLD"
+    section "APT-HELD PACKAGES"
     apt-mark showhold || true
 }
 
@@ -658,16 +658,16 @@ hold_matching_packages() {
     local packages
     mapfile -t packages < <(installed_packages_matching "$regex")
     if ((${#packages[@]} == 0)); then
-        info "Nenhum pacote instalado encontrado para: $label"
+        info "No installed packages found for: $label"
         return 0
     fi
-    printf 'Pacotes encontrados (%s):\n' "$label"
+    printf 'Matching packages (%s):\n' "$label"
     printf '  %s\n' "${packages[@]}"
-    if confirm_exact HOLD "Aplicar apt-mark hold somente a estes pacotes?"; then
+    if confirm_exact HOLD "Apply apt-mark hold to these packages only?"; then
         apt-mark hold "${packages[@]}"
-        status_line PASS "Hold aplicado ao grupo: $label."
+        status_line PASS "Hold applied to group: $label."
     else
-        info "Hold cancelado para: $label"
+        info "Hold cancelled for: $label"
     fi
 }
 
@@ -676,33 +676,33 @@ unhold_matching_packages() {
     local packages
     mapfile -t packages < <(installed_packages_matching "$regex")
     if ((${#packages[@]} == 0)); then
-        info "Nenhum pacote instalado encontrado para: $label"
+        info "No installed packages found for: $label"
         return 0
     fi
-    printf 'Pacotes instalados encontrados (%s):\n' "$label"
+    printf 'Installed matching packages (%s):\n' "$label"
     printf '  %s\n' "${packages[@]}"
-    if confirm_exact UNHOLD "Remover hold destes pacotes, se estiverem bloqueados?"; then
+    if confirm_exact UNHOLD "Remove the hold from these packages, if currently held?"; then
         apt-mark unhold "${packages[@]}" || true
-        status_line PASS "Solicitação de unhold concluída para: $label."
+        status_line PASS "Unhold request completed for: $label."
     else
-        info "Unhold cancelado para: $label"
+        info "Unhold cancelled for: $label"
     fi
 }
 
 menu_system() {
     while true; do
         echo
-        echo "=== SISTEMA / DRIVERS / KERNEL ==="
-        echo "1 - Mostrar pacotes em hold"
-        echo "2 - Aplicar hold a pacotes NVIDIA/CUDA/DCGM instalados"
-        echo "3 - Aplicar hold a pacotes Broadcom/Mellanox instalados"
-        echo "4 - Aplicar hold ao pacote de imagem/headers do kernel atual"
-        echo "5 - Remover hold de pacotes NVIDIA/CUDA/DCGM"
-        echo "6 - Remover hold de pacotes Broadcom/Mellanox"
-        echo "7 - Remover hold do pacote de imagem/headers do kernel atual"
-        echo "8 - Status DKMS e módulos carregados"
-        echo "9 - Voltar"
-        read -r -p "Opção: " opt
+        echo "=== SYSTEM / DRIVERS / KERNEL ==="
+        echo "1 - Show held packages"
+        echo "2 - Hold installed NVIDIA/CUDA/DCGM packages"
+        echo "3 - Hold installed Broadcom/Mellanox packages"
+        echo "4 - Hold the current kernel image/headers packages"
+        echo "5 - Unhold NVIDIA/CUDA/DCGM packages"
+        echo "6 - Unhold Broadcom/Mellanox packages"
+        echo "7 - Unhold the current kernel image/headers packages"
+        echo "8 - DKMS status and loaded modules"
+        echo "9 - Back"
+        read -r -p "Option: " opt
         case "$opt" in
             1) show_holds; pause ;;
             2) hold_matching_packages "NVIDIA/CUDA/DCGM" '^(nvidia-|libnvidia-|cuda-|libcuda|datacenter-gpu-manager|dcgm)'; pause ;;
@@ -710,40 +710,40 @@ menu_system() {
             4)
                 local k
                 k="$(uname -r)"
-                hold_matching_packages "kernel atual ${k}" "^linux-(image|headers)(-unsigned)?-${k//./\\.}($|-)"
+                hold_matching_packages "current kernel ${k}" "^linux-(image|headers)(-unsigned)?-${k//./\\.}($|-)"
                 pause ;;
             5) unhold_matching_packages "NVIDIA/CUDA/DCGM" '^(nvidia-|libnvidia-|cuda-|libcuda|datacenter-gpu-manager|dcgm)'; pause ;;
             6) unhold_matching_packages "Broadcom/Mellanox" '^(bnxt|firmware-bnx2|firmware-brcm|broadcom-sta|mlnx|mellanox|mstflint|ofed)'; pause ;;
             7)
                 local k
                 k="$(uname -r)"
-                unhold_matching_packages "kernel atual ${k}" "^linux-(image|headers)(-unsigned)?-${k//./\\.}($|-)"
+                unhold_matching_packages "current kernel ${k}" "^linux-(image|headers)(-unsigned)?-${k//./\\.}($|-)"
                 pause ;;
             8) dkms_status; pause ;;
             9) break ;;
-            *) warn "Opção inválida." ;;
+            *) warn "Invalid option." ;;
         esac
     done
 }
 
 # ---------- Report and summary ------------------------------------------------
 generate_summary() {
-    section "RESUMO FINAL"
+    section "FINAL SUMMARY"
     {
         echo "Host: $(hostname -f 2>/dev/null || hostname)"
-        echo "Data: $(ts)"
-        echo "Sistema: ${PRETTY_NAME:-unknown}"
+        echo "Date: $(ts)"
+        echo "System: ${PRETTY_NAME:-unknown}"
         echo "Kernel: $(uname -r)"
         echo "Script: ${SCRIPT_VERSION}"
         echo
-        echo "Arquivos:"
+        echo "Files:"
         echo "Log: ${LOG_FILE}"
-        echo "Relatório: ${REPORT_FILE}"
+        echo "Report: ${REPORT_FILE}"
         echo
-        echo "Observação: os módulos não executados devem ser considerados NOT TESTED,"
-        echo "não como PASS. A homologação depende dos critérios do fabricante e do projeto."
+        echo "Note: modules that were not run must be considered NOT TESTED,"
+        echo "not PASS. Qualification depends on vendor and project criteria."
     } | tee -a "$REPORT_FILE"
-    info "Relatório disponível em: ${REPORT_FILE}"
+    info "Report available at: ${REPORT_FILE}"
 }
 
 # ---------- Main menu ---------------------------------------------------------
@@ -753,18 +753,18 @@ main_menu() {
         echo "============================================================"
         echo " SERVER HARDWARE HOMOLOGATION SUITE v${SCRIPT_VERSION}"
         echo "============================================================"
-        echo " 1 - Inventário completo do servidor"
-        echo " 2 - Discos (SMART / FIO não destrutivo)"
-        echo " 3 - Memória RAM (DIMM / memtester)"
-        echo " 4 - Rede (Broadcom / Mellanox)"
+        echo " 1 - Full server inventory"
+        echo " 2 - Disks (SMART / non-destructive FIO)"
+        echo " 3 - RAM (DIMM / memtester)"
+        echo " 4 - Network (Broadcom / Mellanox)"
         echo " 5 - GPU (NVIDIA / DCGM)"
         echo " 6 - PCIe inventory"
-        echo " 7 - Sistema / Drivers / Kernel / APT hold / DKMS"
-        echo " 8 - Ver resumo e caminhos dos relatórios"
-        echo " 9 - Verificar dependências / instalar sob confirmação"
-        echo " 0 - Sair"
+        echo " 7 - System / Drivers / Kernel / APT Holds / DKMS"
+        echo " 8 - View summary and report paths"
+        echo " 9 - Check dependencies / install after confirmation"
+        echo " 0 - Exit"
         echo "------------------------------------------------------------"
-        read -r -p "Selecione: " opt
+        read -r -p "Select: " opt
         case "$opt" in
             1) system_inventory; pause ;;
             2) menu_disks ;;
@@ -775,8 +775,8 @@ main_menu() {
             7) menu_system ;;
             8) generate_summary; pause ;;
             9) ensure_dependencies; pause ;;
-            0) generate_summary; info "Execução encerrada pelo operador."; exit 0 ;;
-            *) warn "Opção inválida." ;;
+            0) generate_summary; info "Execution ended by the operator."; exit 0 ;;
+            *) warn "Invalid option." ;;
         esac
     done
 }
@@ -785,26 +785,26 @@ usage() {
     cat <<EOF
 ${SCRIPT_NAME} v${SCRIPT_VERSION}
 
-Ferramenta interativa de homologação de hardware para Ubuntu Server 24.04.
+Interactive hardware qualification tool for Ubuntu Server 24.04.
 
-Uso:
+Usage:
   sudo bash ${SCRIPT_NAME}
 
 Logs:
   ${LOG_DIR}
 
-Relatórios:
+Reports:
   ${REPORT_DIR}
 
-Por segurança, o script não executa gravação raw em discos, alteração de firmware,
-reboot, power-cycle ou instalação automática de pacotes na inicialização.
+For safety, the script does not perform raw disk writes, firmware changes,
+reboots, power cycles, or automatic package installation at startup.
 
-FIO: oferece perfis de 1, 10 e 50 GiB, limitados a 20% de espaço livre reservado
-e a um teto de 100 GiB. O teste é por arquivo e não substitui validação raw do
-fabricante em ambiente dedicado.
+FIO: provides 1, 10, and 50 GiB profiles, limited by reserving 20% of free space
+and by a 100 GiB cap. Testing is file-based and does not replace raw validation of the
+vendor validation in a dedicated environment.
 
-RAM: memtester é um teste em user-space. Para passes abrangentes, use Memtest86+
-ou ferramenta de diagnóstico bootável aprovada para o hardware.
+RAM: memtester is a user-space test. For comprehensive passes, use Memtest86+
+or a bootable diagnostic tool approved for the hardware.
 EOF
 }
 

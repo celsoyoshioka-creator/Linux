@@ -20,7 +20,7 @@ IFS=$'\n\t'
 umask 027
 
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_VERSION="2.1.0"
+readonly SCRIPT_VERSION="2.2.3"
 readonly TARGET_OS="Ubuntu 24.04 LTS"
 readonly LOG_DIR="/var/log/hardware-homologation"
 readonly REPORT_DIR="/var/log/hardware-homologation/reports"
@@ -74,6 +74,17 @@ require_root() {
     [[ "${EUID}" -eq 0 ]] || die "Run as root: sudo bash ${SCRIPT_NAME}"
 }
 
+require_interactive_terminal() {
+    # Read menu input from the controlling terminal, not from the script's
+    # standard input. This supports: curl ... | sudo bash
+    if [[ ! -e /dev/tty ]] || ! ( : </dev/tty ) 2>/dev/null; then
+        printf '[ERROR] This interactive tool requires a controlling terminal.\n' >&2
+        printf '[ERROR] Run it from an SSH/local terminal with a TTY allocated.\n' >&2
+        exit 2
+    fi
+    exec </dev/tty
+}
+
 init_logging() {
     install -d -m 0750 "$LOG_DIR" "$REPORT_DIR" ||
         die "Could not create ${LOG_DIR}."
@@ -93,7 +104,7 @@ section() {
     printf '\n============================================================\n'
     printf ' %s\n' "$title"
     printf '============================================================\n'
-    info "Iniciando: ${title}"
+    info "Starting: ${title}"
     {
         printf '\n============================================================\n'
         printf ' %s\n' "$title"
@@ -111,7 +122,7 @@ confirm_exact() {
     local expected="$1"
     local prompt="$2"
     local answer
-    read -r -p "${prompt} Enter '${expected}' para confirmar: " answer
+    read -r -p "${prompt} Enter '${expected}' to confirm: " answer
     [[ "$answer" == "$expected" ]]
 }
 
@@ -135,7 +146,7 @@ check_platform() {
         warn "Ubuntu ${VERSION_ID:-unknown}; recommended target: 24.04 LTS."
         status_line WARNING "Ubuntu version differs from 24.04."
     else
-        status_line PASS "Ubuntu 24.04 detectado."
+        status_line PASS "Ubuntu 24.04 detected."
     fi
 
     for cmd in awk grep sed date tee install; do
@@ -229,7 +240,7 @@ disk_health() {
     section "SMART / DISK HEALTH: $dev"
     if ! have smartctl; then
         status_line WARNING "smartctl is not installed."
-        return 1
+        return 0
     fi
     smartctl -H "$dev" || status_line WARNING "SMART returned a non-zero exit code for $dev."
     smartctl -x "$dev" || status_line WARNING "Could not retrieve all SMART data for $dev."
@@ -384,14 +395,32 @@ menu_disks() {
             1) list_disks; pause ;;
             2)
                 list_disks
-                read -r -p "Device (e.g. /dev/sda or /dev/nvme0n1): " dev
-                disk_health "$dev"; pause ;;
+                read -r -p "Device (e.g. /dev/sda or /dev/nvme0n1): " dev || {
+                    warn "No input received. Returning to the disk menu."
+                    continue
+                }
+                if [[ -z "${dev//[[:space:]]/}" ]]; then
+                    warn "No device specified. Enter a device path such as /dev/nvme1n1."
+                elif ! disk_health "$dev"; then
+                    warn "SMART check could not be completed for: $dev"
+                fi
+                pause
+                ;;
             3)
                 list_disks
-                read -r -p "Device containing the filesystem to test: " dev
-                disk_file_test "$dev"; pause ;;
+                read -r -p "Device containing the filesystem to test: " dev || {
+                    warn "No input received. Returning to the disk menu."
+                    continue
+                }
+                if [[ -z "${dev//[[:space:]]/}" ]]; then
+                    warn "No device specified. Enter a device path such as /dev/nvme1n1."
+                elif ! disk_file_test "$dev"; then
+                    warn "File-based FIO could not be started for: $dev"
+                fi
+                pause
+                ;;
             4) break ;;
-            *) warn "Invalid option." ;;
+            *) warn "Invalid option."; pause ;;
         esac
     done
 }
@@ -477,7 +506,7 @@ menu_memory() {
             3) ram_test; pause ;;
             4) memtest86_guidance; pause ;;
             5) break ;;
-            *) warn "Invalid option." ;;
+            *) warn "Invalid option."; pause ;;
         esac
     done
 }
@@ -554,7 +583,7 @@ menu_network() {
                 inspect_interface "$iface"; pause ;;
             4) network_iperf; pause ;;
             5) break ;;
-            *) warn "Invalid option." ;;
+            *) warn "Invalid option."; pause ;;
         esac
     done
 }
@@ -605,7 +634,7 @@ menu_gpu() {
             1) lspci -nn | grep -iE 'VGA|3D|Display|NVIDIA' || true; pause ;;
             2) gpu_diagnostics; pause ;;
             3) break ;;
-            *) warn "Invalid option." ;;
+            *) warn "Invalid option."; pause ;;
         esac
     done
 }
@@ -721,7 +750,7 @@ menu_system() {
                 pause ;;
             8) dkms_status; pause ;;
             9) break ;;
-            *) warn "Invalid option." ;;
+            *) warn "Invalid option."; pause ;;
         esac
     done
 }
@@ -776,7 +805,7 @@ main_menu() {
             8) generate_summary; pause ;;
             9) ensure_dependencies; pause ;;
             0) generate_summary; info "Execution ended by the operator."; exit 0 ;;
-            *) warn "Invalid option." ;;
+            *) warn "Invalid option."; pause ;;
         esac
     done
 }
@@ -800,8 +829,8 @@ For safety, the script does not perform raw disk writes, firmware changes,
 reboots, power cycles, or automatic package installation at startup.
 
 FIO: provides 1, 10, and 50 GiB profiles, limited by reserving 20% of free space
-and by a 100 GiB cap. Testing is file-based and does not replace raw validation of the
-vendor validation in a dedicated environment.
+and by a 100 GiB cap. Testing is file-based and does not replace raw-device
+validation in a dedicated environment.
 
 RAM: memtester is a user-space test. For comprehensive passes, use Memtest86+
 or a bootable diagnostic tool approved for the hardware.
@@ -814,6 +843,7 @@ main() {
         exit 0
     fi
     require_root
+    require_interactive_terminal
     init_logging
     check_platform
     main_menu

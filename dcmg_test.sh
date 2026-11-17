@@ -176,8 +176,8 @@ while kill -0 "$PID_TESTE" 2>/dev/null; do
   STATUS_LINE=""
   
   for TEMP in $TEMPERATURAS; do
-    # Valida se o valor retornado é realmente um número inteiro
-    if ! [[ "$TEMP" =~ ^[0-9]+$ ]]; then
+    # NOVA VALIDAÇÃO: Aceita inteiros e decimais (ex: 85 ou 85.5)
+    if ! [[ "$TEMP" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
       echo ""
       log_error "FALHA CRÍTICA: Resposta inválida ao ler temperatura ($TEMP). O driver da GPU falhou." | tee -a "$LOG_SAIDA_FINAL"
       kill -9 "$PID_TESTE" 2>/dev/null
@@ -190,8 +190,8 @@ while kill -0 "$PID_TESTE" 2>/dev/null; do
       STATUS_LINE="$STATUS_LINE | GPU $GPU_ID: ${TEMP}°C"
     fi
 
-    # Disparo de segurança térmica
-    if [ "$TEMP" -ge "$LIMITE_TEMP" ]; then
+    # NOVA COMPARAÇÃO: Utiliza o awk para avaliar a condição térmica suportando decimais
+    if [ "$(awk -v t="$TEMP" -v l="$LIMITE_TEMP" 'BEGIN {print (t >= l) ? 1 : 0}')" -eq 1 ]; then
       echo ""
       log_error "ALERTA TÉRMICO! GPU $GPU_ID atingiu ${TEMP}°C (Limite: ${LIMITE_TEMP}°C)!" | tee -a "$LOG_SAIDA_FINAL"
       log_warn "Interrompendo o teste do DCGM imediatamente para proteger o hardware..." | tee -a "$LOG_SAIDA_FINAL"
